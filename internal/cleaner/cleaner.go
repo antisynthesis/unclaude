@@ -198,17 +198,30 @@ func (c *Cleaner) CleanSourceComments() error {
 	}
 
 	claudePatterns := []*regexp.Regexp{
+		// Single-line comments with Claude/Anthropic
 		regexp.MustCompile(`(?i)//.*\bclaude\b`),
 		regexp.MustCompile(`(?i)#.*\bclaude\b`),
-		regexp.MustCompile(`(?i)/\*.*\bclaude\b.*\*/`),
-		regexp.MustCompile(`(?i)<!--.*\bclaude\b.*-->`),
 		regexp.MustCompile(`(?i)//.*\banthropic\b`),
 		regexp.MustCompile(`(?i)#.*\banthropic\b`),
+		// Block comments
+		regexp.MustCompile(`(?i)/\*.*\bclaude\b.*\*/`),
+		regexp.MustCompile(`(?i)/\*\*.*\bclaude\b.*\*/`), // JSDoc style
+		regexp.MustCompile(`(?i)<!--.*\bclaude\b.*-->`),  // HTML comments
 		// AI assistance markers
-		regexp.MustCompile(`(?i)//.*\bai\s+(assisted|generated|created)`),
-		regexp.MustCompile(`(?i)#.*\bai\s+(assisted|generated|created)`),
-		regexp.MustCompile(`(?i)//.*\bgenerated\s+with\b`),
-		regexp.MustCompile(`(?i)#.*\bgenerated\s+with\b`),
+		regexp.MustCompile(`(?i)//.*\bai\s+(assisted|generated|created|powered)`),
+		regexp.MustCompile(`(?i)#.*\bai\s+(assisted|generated|created|powered)`),
+		regexp.MustCompile(`(?i)//.*\b(generated|created|built|powered)\s+(with|by)\b.*\bai\b`),
+		regexp.MustCompile(`(?i)#.*\b(generated|created|built|powered)\s+(with|by)\b.*\bai\b`),
+		regexp.MustCompile(`(?i)//.*\b(generated|assisted)\s+(with|by)\b`),
+		regexp.MustCompile(`(?i)#.*\b(generated|assisted)\s+(with|by)\b`),
+		// TODO/FIXME with AI mentions
+		regexp.MustCompile(`(?i)//.*\b(TODO|FIXME|NOTE|HACK).*\b(claude|anthropic|ai)\b`),
+		regexp.MustCompile(`(?i)#.*\b(TODO|FIXME|NOTE|HACK).*\b(claude|anthropic|ai)\b`),
+		// Trailing signatures
+		regexp.MustCompile(`(?i)//\s*-\s*(claude|anthropic)\b`),
+		regexp.MustCompile(`(?i)#\s*-\s*(claude|anthropic)\b`),
+		// Emoji patterns with AI/Claude
+		regexp.MustCompile(`(?i)[🤖🔧✨].*\b(claude|anthropic|ai)\b`),
 	}
 
 	var modifiedFiles int
@@ -476,17 +489,29 @@ func (c *Cleaner) createMessageFilterScript() string {
 	defer tmpFile.Close()
 
 	script := `#!/bin/sh
-cat | sed -e '/Co-Authored-By: Claude <noreply@anthropic.com>/d' \
+cat | sed -e '/Co-Authored-By:.*[Cc]laude/d' \
           -e '/Co-Authored-By:.*anthropic\.com/d' \
-          -e '/🤖 Generated with \[Claude Code\]/d' \
-          -e '/Generated with Claude Code/d' \
+          -e '/[🤖🔧✨].*[Gg]enerated/d' \
+          -e '/[🤖🔧✨].*[Cc]laude/d' \
+          -e '/[🤖🔧✨].*[Aa]nthropic/d' \
+          -e '/Generated with.*[Cc]laude/d' \
+          -e '/Created (with|by).*[Cc]laude/d' \
+          -e '/Built (with|by).*[Cc]laude/d' \
+          -e '/Assisted by.*[Cc]laude/d' \
           -e '/\[Claude Code\]/d' \
-          -e '/claude\.com\/claude-code/d' \
+          -e '/([Cc]laude [Cc]ode)/d' \
+          -e '/claude\.com/d' \
           -e '/anthropic\.com/d' \
-          -e '/AI assisted/d' \
-          -e '/AI-assisted/d' \
-          -e '/AI generated/d' \
-          -e '/AI-generated/d'
+          -e '/AI.assisted/d' \
+          -e '/AI.generated/d' \
+          -e '/AI.created/d' \
+          -e '/AI.powered/d' \
+          -e '/Generated.*by.*AI/d' \
+          -e '/Created.*by.*AI/d' \
+          -e '/Built.*by.*AI/d' \
+          -e '/Powered.*by.*AI/d' \
+          -e '/-.*[Cc]laude$/d' \
+          -e '/-.*[Aa]nthropic$/d'
 `
 	tmpFile.WriteString(script)
 	tmpFile.Chmod(0755)
@@ -511,15 +536,30 @@ func (c *Cleaner) cleanCommitMessage(msg string) string {
 	var lines []string
 
 	claudePatterns := []*regexp.Regexp{
+		// Co-authorship lines
 		regexp.MustCompile(`(?i)Co-Authored-By:\s*Claude\s*<.*@anthropic\.com>`),
 		regexp.MustCompile(`(?i)Co-Authored-By:.*@anthropic\.com`),
+		regexp.MustCompile(`(?i)Co-Authored-By:.*\bclaude\b.*`),
+		// Generation footers and badges
 		regexp.MustCompile(`(?i).*Generated with.*Claude.*`),
 		regexp.MustCompile(`(?i).*\[Claude Code\].*`),
+		regexp.MustCompile(`(?i).*\(Claude Code\).*`),
+		regexp.MustCompile(`(?i).*Created (with|by).*Claude.*`),
+		regexp.MustCompile(`(?i).*Built (with|by).*Claude.*`),
+		regexp.MustCompile(`(?i).*Assisted by.*Claude.*`),
+		// URLs and links
 		regexp.MustCompile(`(?i).*claude\.com.*`),
 		regexp.MustCompile(`(?i).*anthropic\.com.*`),
+		// Emoji badges
 		regexp.MustCompile(`🤖.*Claude.*`),
-		regexp.MustCompile(`(?i).*AI\s+(assisted|generated|created).*`),
-		regexp.MustCompile(`(?i).*AI-(assisted|generated|created).*`),
+		regexp.MustCompile(`🤖.*Anthropic.*`),
+		regexp.MustCompile(`(?i)[🤖🔧✨].*\b(generated|created|built|powered).*`),
+		// AI markers
+		regexp.MustCompile(`(?i).*AI\s+(assisted|generated|created|powered).*`),
+		regexp.MustCompile(`(?i).*AI-(assisted|generated|created|powered).*`),
+		regexp.MustCompile(`(?i).*(Generated|Created|Built|Powered)\s+(with|by)\s+AI.*`),
+		// Signed-off style
+		regexp.MustCompile(`(?i).*-\s*(Claude|Anthropic)(\s|$).*`),
 	}
 
 	for scanner.Scan() {

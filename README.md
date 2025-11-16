@@ -1,3 +1,5 @@
+![unclaude](img/unclaude-social.png)
+
 # unclaude
 
 A utility that returns your repository to human hands.
@@ -113,15 +115,22 @@ Comprehensive pattern matching removes AI-related comments from:
 
 Patterns detect:
 - Direct mentions: "Claude", "Claude Code", "Anthropic"
-- AI markers: "AI-assisted", "AI-generated", "AI created"
-- Generation tags: "Generated with", "Assisted by"
+- AI markers: "AI-assisted", "AI-generated", "AI-created", "AI-powered"
+- Generation tags: "Generated with/by", "Created with/by", "Built with/by", "Assisted by"
+- TODO/FIXME comments mentioning AI assistance
+- Trailing signatures (e.g., "// - Claude")
+- Comment blocks (single-line, multi-line, JSDoc, HTML)
+- Emoji badges (🤖, 🔧, ✨) followed by AI-related text
 
 ### Commit History
 Git history is rewritten using `filter-branch` to remove:
 - Co-authorship lines (`Co-Authored-By: Claude <noreply@anthropic.com>`)
-- Generation footers and emoji badges
+- Generation footers and badges (`[Claude Code]`, `(Claude Code)`)
+- Emoji badges (🤖, 🔧, ✨) with generation markers
 - Tool attribution links (claude.com, anthropic.com)
-- AI assistance markers
+- AI assistance markers ("AI-assisted", "AI-generated", "AI-powered")
+- Creation attribution ("Created/Built/Generated with/by AI")
+- Trailing signatures ("- Claude", "- Anthropic")
 
 **Safety measures:**
 - **Preview mode by default** - no changes made without `--apply`
