@@ -80,7 +80,7 @@ Combined flags:
 unclaude --interactive --verbose ~/projects/my-repo
 ```
 
-**Important:** Git history rewriting always requires explicit confirmation, regardless of flags. You'll be prompted to confirm before any destructive changes to commit history.
+**Important:** The tool scans commit history first. If AI traces are found, you'll be prompted to confirm before any destructive changes. If no traces are found, no prompt appears and git history is left untouched.
 
 ## Details
 
@@ -121,12 +121,13 @@ Git history is rewritten using `filter-branch` to remove:
 - AI assistance markers
 
 **Safety measures:**
-- Requires confirmation prompt before rewriting (always asks, even without `--interactive`)
+- Scans commit history first to detect AI traces
+- Only prompts for confirmation if changes are actually needed
 - Checks for unstaged changes and aborts if found
-- Only runs in dry-run mode without prompting
-- Displays warning about permanent, destructive nature
+- Displays clear warning about permanent, destructive nature
+- Dry-run mode shows what would be changed without prompting
 
-History rewriting is permanent and destructive. Always use `--dry-run` first to preview changes.
+The tool will NOT prompt or attempt rewriting if no AI traces are found in your commit history. History rewriting is permanent and destructive. Always use `--dry-run` first to preview changes.
 
 ## Requirements
 

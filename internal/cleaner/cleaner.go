@@ -379,80 +379,90 @@ func (c *Cleaner) CleanGitHistory() error {
 		originalMsg := string(msgOutput)
 		cleanedMsg := c.cleanCommitMessage(originalMsg)
 
-		if originalMsg != cleanedMsg {
+		// Normalize both for comparison (remove trailing empty lines from original too)
+		normalizedOriginal := c.normalizeMessage(originalMsg)
+
+		if normalizedOriginal != cleanedMsg {
 			modifiedCount++
 			if c.verbose {
 				shortHash := commit
 				if len(commit) > 7 {
 					shortHash = commit[:7]
 				}
-				fmt.Printf("Cleaning commit: %s\n", shortHash)
-			}
-
-			if !c.dryRun {
-				// We'll use git filter-branch later for actual rewriting
-				// For now, just count what would be changed
+				fmt.Printf("Found AI traces in commit: %s\n", shortHash)
 			}
 		}
 	}
 
-	if modifiedCount > 0 {
-		if !c.dryRun {
-			// Prompt for confirmation before rewriting history (unless skipped for testing)
-			if !c.skipHistoryPrompt {
-				fmt.Printf("\nFound %d commit(s) with AI assistance traces.\n", modifiedCount)
-				fmt.Println("⚠️  WARNING: Rewriting git history is DESTRUCTIVE and PERMANENT!")
-				fmt.Println("This will change all commit hashes and cannot be undone.")
-				fmt.Print("\nProceed with git history rewrite? [y/N]: ")
+	// Only prompt and rewrite if changes were found
+	if modifiedCount == 0 {
+		if c.verbose {
+			fmt.Println("No AI assistance traces found in commit history")
+		}
+		return nil
+	}
 
-				var response string
-				fmt.Scanln(&response)
-				response = strings.ToLower(strings.TrimSpace(response))
+	// Show what was found
+	if c.verbose || c.dryRun {
+		fmt.Printf("\nFound %d commit(s) with AI assistance traces\n", modifiedCount)
+	}
 
-				if response != "y" && response != "yes" {
-					fmt.Println("Skipped git history rewriting.")
-					return nil
-				}
-			}
+	// In dry-run mode, just report and exit
+	if c.dryRun {
+		return nil
+	}
 
-			// Use git filter-repo approach via filter-branch
-			// Create a message filter script
-			filterScript := c.createMessageFilterScript()
-			defer os.Remove(filterScript)
+	// Prompt for confirmation before rewriting (unless skipped for testing)
+	if !c.skipHistoryPrompt {
+		fmt.Printf("\nFound %d commit(s) with AI assistance traces.\n", modifiedCount)
+		fmt.Println("⚠️  WARNING: Rewriting git history is DESTRUCTIVE and PERMANENT!")
+		fmt.Println("This will change all commit hashes and cannot be undone.")
+		fmt.Print("\nProceed with git history rewrite? [y/N]: ")
 
-			fmt.Println("\nRewriting git history...")
-			cmd := exec.Command("git", "-C", c.repoDir, "filter-branch", "-f", "--msg-filter",
-				fmt.Sprintf("sh %s", filterScript), "--", "--all")
+		var response string
+		fmt.Scanln(&response)
+		response = strings.ToLower(strings.TrimSpace(response))
 
-			var stderr bytes.Buffer
-			cmd.Stderr = &stderr
-
-			if err := cmd.Run(); err != nil {
-				return fmt.Errorf("failed to rewrite git history: %w\nStderr: %s", err, stderr.String())
-			}
-
-			// Clean up backup refs
-			cleanupCmd := exec.Command("git", "-C", c.repoDir, "for-each-ref", "--format=%(refname)", "refs/original/")
-			refOutput, err := cleanupCmd.Output()
-			if err == nil && len(refOutput) > 0 {
-				refs := strings.Split(strings.TrimSpace(string(refOutput)), "\n")
-				for _, ref := range refs {
-					ref = strings.TrimSpace(ref)
-					if ref != "" {
-						exec.Command("git", "-C", c.repoDir, "update-ref", "-d", ref).Run()
-					}
-				}
-			}
-
-			// Cleanup reflog and gc
-			exec.Command("git", "-C", c.repoDir, "reflog", "expire", "--expire=now", "--all").Run()
-			exec.Command("git", "-C", c.repoDir, "gc", "--prune=now", "--aggressive").Run()
-
-			fmt.Printf("\nCleaned %d commit message(s)\n", modifiedCount)
-		} else {
-			fmt.Printf("\nFound %d commit message(s) that would be cleaned\n", modifiedCount)
+		if response != "y" && response != "yes" {
+			fmt.Println("Skipped git history rewriting.")
+			return nil
 		}
 	}
+
+	// Use git filter-repo approach via filter-branch
+	// Create a message filter script
+	filterScript := c.createMessageFilterScript()
+	defer os.Remove(filterScript)
+
+	fmt.Println("\nRewriting git history...")
+	cmd := exec.Command("git", "-C", c.repoDir, "filter-branch", "-f", "--msg-filter",
+		fmt.Sprintf("sh %s", filterScript), "--", "--all")
+
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to rewrite git history: %w\nStderr: %s", err, stderr.String())
+	}
+
+	// Clean up backup refs
+	cleanupCmd := exec.Command("git", "-C", c.repoDir, "for-each-ref", "--format=%(refname)", "refs/original/")
+	refOutput, err := cleanupCmd.Output()
+	if err == nil && len(refOutput) > 0 {
+		refs := strings.Split(strings.TrimSpace(string(refOutput)), "\n")
+		for _, ref := range refs {
+			ref = strings.TrimSpace(ref)
+			if ref != "" {
+				exec.Command("git", "-C", c.repoDir, "update-ref", "-d", ref).Run()
+			}
+		}
+	}
+
+	// Cleanup reflog and gc
+	exec.Command("git", "-C", c.repoDir, "reflog", "expire", "--expire=now", "--all").Run()
+	exec.Command("git", "-C", c.repoDir, "gc", "--prune=now", "--aggressive").Run()
+
+	fmt.Printf("\nCleaned %d commit message(s)\n", modifiedCount)
 
 	return nil
 }
@@ -482,6 +492,18 @@ cat | sed -e '/Co-Authored-By: Claude <noreply@anthropic.com>/d' \
 	tmpFile.Chmod(0755)
 
 	return tmpFile.Name()
+}
+
+// normalizeMessage removes trailing empty lines from a commit message.
+func (c *Cleaner) normalizeMessage(msg string) string {
+	lines := strings.Split(msg, "\n")
+
+	// Remove trailing empty lines
+	for len(lines) > 0 && strings.TrimSpace(lines[len(lines)-1]) == "" {
+		lines = lines[:len(lines)-1]
+	}
+
+	return strings.Join(lines, "\n") + "\n"
 }
 
 func (c *Cleaner) cleanCommitMessage(msg string) string {
