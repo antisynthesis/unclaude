@@ -6,6 +6,8 @@ Removes Claude Code's operational artifacts—.claude directories, metadata file
 
 Not a rejection of AI assistance, but a choice about what remains.
 
+**Safe by default:** Runs in preview mode unless you explicitly use `--apply`.
+
 Tools for the digital human experience.
 
 ## What Gets Removed
@@ -37,50 +39,51 @@ make build
 
 ## Usage
 
-Run within your repository:
+**By default, `unclaude` runs in preview mode** - showing what would be changed without modifying anything.
 
+Preview your repository:
 ```bash
 unclaude
 ```
 
-Specify a path:
-
+Actually apply changes:
 ```bash
-unclaude /path/to/repo
+unclaude --apply
+```
+
+Specify a path:
+```bash
+unclaude --apply /path/to/repo
 ```
 
 ### Options
 
 ```
--n, --dry-run       Preview changes without modification
--i, --interactive   Prompt before deleting each markdown file
+--apply             Apply changes (default is preview mode)
+-i, --interactive   Prompt before deleting each markdown file (requires --apply)
 -v, --verbose       Detailed operation output
 -h, --help          Display usage information
 ```
 
 ### Examples
 
-Preview before execution:
+Preview mode (default, safe):
 ```bash
-unclaude --dry-run
-```
-
-Interactive mode with confirmation prompts:
-```bash
-unclaude --interactive
-```
-
-Detailed operation log:
-```bash
+unclaude
 unclaude --verbose
 ```
 
-Combined flags:
+Apply changes with interactive prompts:
 ```bash
-unclaude --interactive --verbose ~/projects/my-repo
+unclaude --apply --interactive
 ```
 
-**Important:** The tool scans commit history first. If AI traces are found, you'll be prompted to confirm before any destructive changes. If no traces are found, no prompt appears and git history is left untouched.
+Apply changes with detailed output:
+```bash
+unclaude --apply --verbose ~/projects/my-repo
+```
+
+**Important:** Preview mode is the default. The tool scans everything first and shows what would be changed. Use `--apply` only when you're ready to make permanent changes.
 
 ## Details
 
@@ -121,13 +124,13 @@ Git history is rewritten using `filter-branch` to remove:
 - AI assistance markers
 
 **Safety measures:**
+- **Preview mode by default** - no changes made without `--apply`
 - Scans commit history first to detect AI traces
 - Only prompts for confirmation if changes are actually needed
-- Checks for unstaged changes and aborts if found
+- Checks for unstaged changes and aborts if found (in apply mode)
 - Displays clear warning about permanent, destructive nature
-- Dry-run mode shows what would be changed without prompting
 
-The tool will NOT prompt or attempt rewriting if no AI traces are found in your commit history. History rewriting is permanent and destructive. Always use `--dry-run` first to preview changes.
+The tool will NOT prompt or attempt rewriting if no AI traces are found. History rewriting is permanent and destructive. Always preview first before using `--apply`.
 
 ## Requirements
 
