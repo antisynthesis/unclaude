@@ -17,6 +17,9 @@ coverage.*
 *.coverprofile
 profile.cov
 
+# macOS
+.DS_STORE
+
 # Dependency directories (remove the comment below to include it)
 # vendor/
 
