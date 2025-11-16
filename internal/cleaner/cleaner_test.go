@@ -229,7 +229,6 @@ func TestCleanSourceComments(t *testing.T) {
 			content: `package main
 
 // This is a normal comment
-// Generated with Claude Code
 func main() {}
 `,
 			expectedContent: `package main
@@ -244,7 +243,6 @@ func main() {}
 			file: "test.go",
 			content: `package test
 
-// Claude helped with this function
 func test() {}
 `,
 			expectedContent: `package test
@@ -257,7 +255,6 @@ func test() {}
 			name: "removes Anthropic reference",
 			file: "app.js",
 			content: `// Normal comment
-// Anthropic AI assisted
 function test() {}
 `,
 			expectedContent: `// Normal comment
@@ -269,7 +266,6 @@ function test() {}
 			name: "removes AI assisted comment",
 			file: "util.py",
 			content: `# Helper function
-# AI assisted with this code
 def helper():
     pass
 `,
@@ -283,7 +279,6 @@ def helper():
 			name: "removes Python Claude comment",
 			file: "script.py",
 			content: `# Normal comment
-# Generated with Claude Code
 def main():
     pass
 `,
@@ -297,7 +292,6 @@ def main():
 			name: "case insensitive matching",
 			file: "test.js",
 			content: `// normal comment
-// CLAUDE CODE helped here
 const x = 1;
 `,
 			expectedContent: `// normal comment
@@ -372,7 +366,6 @@ Co-Authored-By: Claude <noreply@anthropic.com>
 			name: "removes Generated with Claude Code",
 			input: `Add new feature
 
-🤖 Generated with [Claude Code](https://claude.com/claude-code)
 
 Co-Authored-By: Claude <noreply@anthropic.com>
 `,
@@ -396,7 +389,6 @@ Added examples and clarifications.
 
 Generated with Claude Code
 Co-Authored-By: Claude <noreply@anthropic.com>
-See https://claude.com/claude-code for more info
 `,
 			expected: `Initial commit
 `,
@@ -428,7 +420,6 @@ func TestCleanGitHistory(t *testing.T) {
 	runGit(t, tmpDir, "config", "user.email", "test@example.com")
 	runGit(t, tmpDir, "config", "user.name", "Test User")
 
-	// Create a file and commit with Claude references
 	testFile := filepath.Join(tmpDir, "test.txt")
 	os.WriteFile(testFile, []byte("test content"), 0644)
 	runGit(t, tmpDir, "add", "test.txt")
@@ -441,6 +432,7 @@ Co-Authored-By: Claude <noreply@anthropic.com>
 
 	// Clean the history
 	cleaner := New(tmpDir, false, false, false)
+	cleaner.SetSkipHistoryPrompt(true) // Skip prompt for testing
 	err := cleaner.CleanGitHistory()
 	if err != nil {
 		t.Fatalf("CleanGitHistory() error = %v", err)

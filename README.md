@@ -80,6 +80,8 @@ Combined flags:
 unclaude --interactive --verbose ~/projects/my-repo
 ```
 
+**Important:** Git history rewriting always requires explicit confirmation, regardless of flags. You'll be prompted to confirm before any destructive changes to commit history.
+
 ## Details
 
 ### `.claude/` Directory
@@ -118,7 +120,13 @@ Git history is rewritten using `filter-branch` to remove:
 - Tool attribution links (claude.com, anthropic.com)
 - AI assistance markers
 
-History rewriting is permanent and destructive. Always use `--dry-run` first.
+**Safety measures:**
+- Requires confirmation prompt before rewriting (always asks, even without `--interactive`)
+- Checks for unstaged changes and aborts if found
+- Only runs in dry-run mode without prompting
+- Displays warning about permanent, destructive nature
+
+History rewriting is permanent and destructive. Always use `--dry-run` first to preview changes.
 
 ## Requirements
 

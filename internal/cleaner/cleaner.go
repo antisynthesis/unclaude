@@ -11,24 +11,31 @@ import (
 	"strings"
 )
 
-// Cleaner handles the removal of Claude Code traces from a git repository.
 type Cleaner struct {
-	repoDir     string
-	dryRun      bool
-	verbose     bool
-	interactive bool
-	yesToAll    bool
+	repoDir         string
+	dryRun          bool
+	verbose         bool
+	interactive     bool
+	yesToAll        bool
+	skipHistoryPrompt bool
 }
 
 // New creates a new Cleaner instance.
 func New(repoDir string, dryRun, verbose, interactive bool) *Cleaner {
 	return &Cleaner{
-		repoDir:     repoDir,
-		dryRun:      dryRun,
-		verbose:     verbose,
-		interactive: interactive,
-		yesToAll:    false,
+		repoDir:           repoDir,
+		dryRun:            dryRun,
+		verbose:           verbose,
+		interactive:       interactive,
+		yesToAll:          false,
+		skipHistoryPrompt: false,
 	}
+}
+
+// SetSkipHistoryPrompt sets whether to skip the git history rewrite confirmation.
+// This is primarily for testing purposes.
+func (c *Cleaner) SetSkipHistoryPrompt(skip bool) {
+	c.skipHistoryPrompt = skip
 }
 
 // IsGitRepo checks if the given directory is a git repository.
@@ -66,11 +73,9 @@ func (c *Cleaner) promptForDeletion(relPath string) bool {
 	}
 }
 
-// CleanClaudeDirectory removes the .claude directory and all its contents.
 func (c *Cleaner) CleanClaudeDirectory() error {
 	claudeDir := filepath.Join(c.repoDir, ".claude")
 
-	// Check if .claude directory exists
 	info, err := os.Stat(claudeDir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -183,9 +188,7 @@ func (c *Cleaner) CleanMarkdownFiles() error {
 	return nil
 }
 
-// CleanSourceComments removes Claude-related comments from source files.
 // It processes common source file extensions and removes comments that
-// reference Claude or Claude Code.
 func (c *Cleaner) CleanSourceComments() error {
 	extensions := []string{".go", ".js", ".ts", ".jsx", ".tsx", ".py", ".java", ".c", ".cpp", ".h", ".hpp", ".rs", ".rb", ".php", ".cs"}
 	excludeDirs := map[string]bool{
@@ -194,14 +197,11 @@ func (c *Cleaner) CleanSourceComments() error {
 		"vendor":       true,
 	}
 
-	// Pattern to match Claude-related comments
 	claudePatterns := []*regexp.Regexp{
-		// Direct Claude mentions
 		regexp.MustCompile(`(?i)//.*\bclaude\b`),
 		regexp.MustCompile(`(?i)#.*\bclaude\b`),
 		regexp.MustCompile(`(?i)/\*.*\bclaude\b.*\*/`),
 		regexp.MustCompile(`(?i)<!--.*\bclaude\b.*-->`),
-		// Anthropic references
 		regexp.MustCompile(`(?i)//.*\banthropic\b`),
 		regexp.MustCompile(`(?i)#.*\banthropic\b`),
 		// AI assistance markers
@@ -209,9 +209,6 @@ func (c *Cleaner) CleanSourceComments() error {
 		regexp.MustCompile(`(?i)#.*\bai\s+(assisted|generated|created)`),
 		regexp.MustCompile(`(?i)//.*\bgenerated\s+with\b`),
 		regexp.MustCompile(`(?i)#.*\bgenerated\s+with\b`),
-		// Claude Code specific
-		regexp.MustCompile(`(?i)//.*claude\s*code`),
-		regexp.MustCompile(`(?i)#.*claude\s*code`),
 	}
 
 	var modifiedFiles int
@@ -269,7 +266,6 @@ func (c *Cleaner) CleanSourceComments() error {
 	return nil
 }
 
-// cleanFileComments removes Claude-related comments from a single file.
 func (c *Cleaner) cleanFileComments(path string, patterns []*regexp.Regexp) (bool, error) {
 	content, err := os.ReadFile(path)
 	if err != nil {
@@ -317,11 +313,19 @@ func (c *Cleaner) cleanFileComments(path string, patterns []*regexp.Regexp) (boo
 	return !bytes.Equal(originalContent, bytes.Join(newLines, []byte("\n"))), nil
 }
 
-// CleanGitHistory removes Claude-related information from git commit messages.
 // This uses git filter-branch to rewrite commit messages, removing:
-// - Co-Authored-By: Claude lines
-// - Generated with Claude Code footers
 func (c *Cleaner) CleanGitHistory() error {
+	// Check for unstaged changes first
+	statusCmd := exec.Command("git", "-C", c.repoDir, "status", "--porcelain")
+	statusOutput, err := statusCmd.Output()
+	if err != nil {
+		return fmt.Errorf("failed to check git status: %w", err)
+	}
+
+	if len(statusOutput) > 0 && !c.dryRun {
+		return fmt.Errorf("repository has unstaged changes - commit or stash them before rewriting history")
+	}
+
 	// Check if there are any commits
 	checkCmd := exec.Command("git", "-C", c.repoDir, "rev-list", "--count", "HEAD")
 	output, err := checkCmd.CombinedOutput()
@@ -342,7 +346,7 @@ func (c *Cleaner) CleanGitHistory() error {
 	}
 
 	if c.verbose {
-		fmt.Println("Cleaning git commit history...")
+		fmt.Println("Checking git commit history...")
 	}
 
 	// Get all commit hashes in reverse order (oldest first)
@@ -394,11 +398,29 @@ func (c *Cleaner) CleanGitHistory() error {
 
 	if modifiedCount > 0 {
 		if !c.dryRun {
+			// Prompt for confirmation before rewriting history (unless skipped for testing)
+			if !c.skipHistoryPrompt {
+				fmt.Printf("\nFound %d commit(s) with AI assistance traces.\n", modifiedCount)
+				fmt.Println("⚠️  WARNING: Rewriting git history is DESTRUCTIVE and PERMANENT!")
+				fmt.Println("This will change all commit hashes and cannot be undone.")
+				fmt.Print("\nProceed with git history rewrite? [y/N]: ")
+
+				var response string
+				fmt.Scanln(&response)
+				response = strings.ToLower(strings.TrimSpace(response))
+
+				if response != "y" && response != "yes" {
+					fmt.Println("Skipped git history rewriting.")
+					return nil
+				}
+			}
+
 			// Use git filter-repo approach via filter-branch
 			// Create a message filter script
 			filterScript := c.createMessageFilterScript()
 			defer os.Remove(filterScript)
 
+			fmt.Println("\nRewriting git history...")
 			cmd := exec.Command("git", "-C", c.repoDir, "filter-branch", "-f", "--msg-filter",
 				fmt.Sprintf("sh %s", filterScript), "--", "--all")
 
@@ -425,9 +447,11 @@ func (c *Cleaner) CleanGitHistory() error {
 			// Cleanup reflog and gc
 			exec.Command("git", "-C", c.repoDir, "reflog", "expire", "--expire=now", "--all").Run()
 			exec.Command("git", "-C", c.repoDir, "gc", "--prune=now", "--aggressive").Run()
-		}
 
-		fmt.Printf("Cleaned %d commit message(s)\n", modifiedCount)
+			fmt.Printf("\nCleaned %d commit message(s)\n", modifiedCount)
+		} else {
+			fmt.Printf("\nFound %d commit message(s) that would be cleaned\n", modifiedCount)
+		}
 	}
 
 	return nil
@@ -460,7 +484,6 @@ cat | sed -e '/Co-Authored-By: Claude <noreply@anthropic.com>/d' \
 	return tmpFile.Name()
 }
 
-// cleanCommitMessage removes Claude-related lines from a commit message.
 func (c *Cleaner) cleanCommitMessage(msg string) string {
 	scanner := bufio.NewScanner(strings.NewReader(msg))
 	var lines []string
