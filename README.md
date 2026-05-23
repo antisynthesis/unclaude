@@ -4,7 +4,7 @@
 
 A utility that returns your repository to human hands.
 
-Removes Claude Code's operational artifacts—.claude directories, metadata files, and automated traces—leaving only your intentional work behind. For when you need a clean slate, a handoff to another developer, or simply want your repository to reflect human authorship alone.
+Removes traces left behind by AI coding assistants — Claude Code, Codex CLI, Cursor, Continue, Aider, GitHub Copilot — including tool directories, instruction files, source comments, and commit-message footers. The repository is left reflecting only your intentional work.
 
 Not a rejection of AI assistance, but a choice about what remains.
 
@@ -14,16 +14,35 @@ Tools for the digital human experience.
 
 ## What Gets Removed
 
-- `.claude/` directory and all contents (commands, skills, configurations)
-- Markdown documentation files (excluding root README.md and docs/, doc/, adr/)
-- Source code comments containing:
-  - References to Claude, Claude Code, or Anthropic
-  - AI assistance markers (AI-assisted, AI-generated, etc.)
-  - Generated-with signatures
-- Git commit history traces:
-  - Co-authorship attributions (`Co-Authored-By: Claude`)
-  - Generation footers and automation signatures
-  - Links to claude.com or anthropic.com
+**AI tool directories** (anywhere in the tree):
+- `.claude/`, `.codex/`, `.cursor/`, `.continue/`, `.aider/`
+
+**AI tool files** (anywhere in the tree — these override the `docs/` allowlist):
+- `CLAUDE.md`, `AGENTS.md`
+- `.mcp.json`, `.claude.json`, `.claudeignore`
+- `.cursorrules`, `.cursorignore`
+- `.aider.conf.yml`, `.aider.input.history`, `.aider.chat.history.md`
+- `.github/copilot-instructions.md`
+
+**Markdown files** (with allowlist):
+- Root `README.md` preserved
+- `docs/`, `doc/`, `adr/` subtrees preserved (except AI tool files above)
+
+**Source code comments** containing:
+- Vendor mentions: Claude, Anthropic, Codex, ChatGPT, OpenAI
+- AI assistance markers: AI-assisted, AI-generated, AI-created, AI-powered
+- Generation tags: Generated/Created/Built with/by (AI|Claude|Codex|…)
+- Session URLs: claude.ai, claude.com, anthropic.com, chatgpt.com, openai.com
+
+Comments are removed correctly whether they're standalone (whole line dropped), end-of-line (only the comment stripped, code preserved), or multi-line block comments (`/* … */`, `""" … """`, `<!-- … -->`).
+
+**Commit message footers**:
+- `Co-Authored-By: Claude <…@anthropic.com>` and friends
+- `Co-Authored-By: Codex|ChatGPT <…@openai.com>`
+- Generation footers: `[Claude Code]`, `(Codex CLI)`, `Generated with …`
+- Session permalinks: `claude.ai/code/session_…`, `chatgpt.com/share/…`
+- Emoji badges (🤖, 🔧, ✨) with generation markers
+- Trailing signatures (`- Claude`, `- Codex`, …)
 
 ## Installation
 
@@ -41,14 +60,14 @@ make build
 
 ## Usage
 
-**By default, `unclaude` runs in preview mode** - showing what would be changed without modifying anything.
+**By default, `unclaude` runs in preview mode** — showing what would be changed without modifying anything.
 
 Preview your repository:
 ```bash
 unclaude
 ```
 
-Actually apply changes:
+Apply changes:
 ```bash
 unclaude --apply
 ```
@@ -63,8 +82,22 @@ unclaude --apply /path/to/repo
 ```
 --apply             Apply changes (default is preview mode)
 -i, --interactive   Prompt before deleting each markdown file (requires --apply)
--v, --verbose       Detailed operation output
+-v, --verbose       Show debug-level output
+    --quiet         Suppress info-level output; only warnings and errors
+    --json          Emit logs as JSON instead of human-readable console
+    --purge-refs    After history rewrite, delete refs/original/ and run aggressive gc
 -h, --help          Display usage information
+```
+
+### Output
+
+`unclaude` logs to stdout using [Uber's zap](https://github.com/uber-go/zap) with RFC3339 timestamps. Default is human-readable console output; pass `--json` for structured logs (useful in CI pre-commit hooks).
+
+```
+2025-05-23T14:02:18Z  INFO  preview mode (no changes will be made); use --apply to modify the repository
+2025-05-23T14:02:18Z  INFO  removing ai tool directory  {"path": ".claude"}
+2025-05-23T14:02:18Z  INFO  removing ai tool file       {"path": "CLAUDE.md"}
+2025-05-23T14:02:18Z  INFO  markdown removal summary    {"removed": 2}
 ```
 
 ### Examples
@@ -73,6 +106,7 @@ Preview mode (default, safe):
 ```bash
 unclaude
 unclaude --verbose
+unclaude --json    # machine-readable
 ```
 
 Apply changes with interactive prompts:
@@ -80,84 +114,54 @@ Apply changes with interactive prompts:
 unclaude --apply --interactive
 ```
 
-Apply changes with detailed output:
+Apply changes and purge git backup refs:
 ```bash
-unclaude --apply --verbose ~/projects/my-repo
+unclaude --apply --purge-refs
 ```
 
-**Important:** Preview mode is the default. The tool scans everything first and shows what would be changed. Use `--apply` only when you're ready to make permanent changes.
+**Important:** Preview mode is the default. Use `--apply` only when you're ready to make permanent changes.
 
-## Details
+## Git History Rewriting
 
-### `.claude/` Directory
-Complete removal of Claude Code's configuration directory including:
-- Custom slash commands
-- Skill definitions
-- Tool configurations
-- Any metadata files
+`unclaude` prefers [`git-filter-repo`](https://github.com/newren/git-filter-repo) when it is available on `PATH` — this is the rewriting tool the Git project recommends since `filter-branch` was deprecated. If `git-filter-repo` is not installed, `unclaude` falls back to `git filter-branch` and emits a warning.
 
-### Markdown Files
-All `.md` files throughout the repository tree, with exceptions:
-- Root `README.md` is preserved
-- Documentation directories remain untouched: `docs/`, `doc/`, `adr/`
-- Dependencies and version control: `.git/`, `node_modules/`, `vendor/`
-
-Interactive mode (`--interactive`) prompts before each deletion:
-- `y` or `yes` - Delete this file
-- `n` or `no` (default) - Skip this file
-- `a` or `all` - Delete this and all remaining files (no more prompts)
-
-### Source Comments
-Comprehensive pattern matching removes AI-related comments from:
-- Go, JavaScript, TypeScript, JSX, TSX
-- Python, Java, C, C++, Rust
-- Ruby, PHP, C#
-
-Patterns detect:
-- Direct mentions: "Claude", "Claude Code", "Anthropic"
-- AI markers: "AI-assisted", "AI-generated", "AI-created", "AI-powered"
-- Generation tags: "Generated with/by", "Created with/by", "Built with/by", "Assisted by"
-- TODO/FIXME comments mentioning AI assistance
-- Trailing signatures (e.g., "// - Claude")
-- Comment blocks (single-line, multi-line, JSDoc, HTML)
-- Emoji badges (🤖, 🔧, ✨) followed by AI-related text
-
-### Commit History
-Git history is rewritten using `filter-branch` to remove:
-- Co-authorship lines (`Co-Authored-By: Claude <noreply@anthropic.com>`)
-- Generation footers and badges (`[Claude Code]`, `(Claude Code)`)
-- Emoji badges (🤖, 🔧, ✨) with generation markers
-- Tool attribution links (claude.com, anthropic.com)
-- AI assistance markers ("AI-assisted", "AI-generated", "AI-powered")
-- Creation attribution ("Created/Built/Generated with/by AI")
-- Trailing signatures ("- Claude", "- Anthropic")
+After the rewrite, `unclaude` leaves the original refs under `refs/original/` by default so you can recover if something looks wrong. Pass `--purge-refs` to delete them and run `git gc --prune=now --aggressive` immediately.
 
 **Safety measures:**
-- **Preview mode by default** - no changes made without `--apply`
+- Preview mode by default — no changes without `--apply`
 - Scans commit history first to detect AI traces
 - Only prompts for confirmation if changes are actually needed
-- Checks for unstaged changes and aborts if found (in apply mode)
-- Displays clear warning about permanent, destructive nature
+- Aborts if there are unstaged changes (in apply mode)
+- Backup refs preserved by default (`refs/original/`)
+- Warns that signed commits will be invalidated by the rewrite
 
-The tool will NOT prompt or attempt rewriting if no AI traces are found. History rewriting is permanent and destructive. Always preview first before using `--apply`.
+History rewriting is permanent and changes all commit hashes downstream of the rewritten commits. Coordinate with your team before running on a shared branch.
 
 ## Requirements
 
 - Go 1.21+
 - Git (for history operations)
+- Optional but recommended: `git-filter-repo` (for the non-deprecated rewrite path)
 
 ## Development
 
 Tests:
 ```bash
-go test ./... -v
+go test ./... -race
 ```
 
 Structure:
 ```
-cmd/unclaude/       Command interface
-internal/cleaner/   Core operations
+cmd/unclaude/             Command interface
+internal/cleaner/         Core operations
+    cleaner.go            Orchestrator + struct
+    logger.go             Zap setup (RFC3339, console/JSON)
+    patterns.go           Centralised regex definitions
+    comments.go           Source-comment scrubbing (inline + multi-line)
+    history.go            Git history rewrite (filter-repo / filter-branch)
 ```
+
+CI runs `gofmt`, `go vet`, `go build`, and `go test -race` on every push and PR via `.github/workflows/ci.yml`.
 
 ## License
 

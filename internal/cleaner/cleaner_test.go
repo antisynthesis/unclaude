@@ -8,6 +8,10 @@ import (
 	"testing"
 )
 
+func newTestCleaner(repo string, dryRun bool) *Cleaner {
+	return New(repo, Options{DryRun: dryRun})
+}
+
 func TestIsGitRepo(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -48,11 +52,11 @@ func TestIsGitRepo(t *testing.T) {
 	}
 }
 
-func TestCleanClaudeDirectory(t *testing.T) {
+func TestCleanAIArtifactsRemovesDirectories(t *testing.T) {
 	tests := []struct {
-		name      string
-		setup     func(string)
-		dryRun    bool
+		name        string
+		setup       func(string)
+		dryRun      bool
 		shouldExist bool
 	}{
 		{
@@ -69,8 +73,7 @@ func TestCleanClaudeDirectory(t *testing.T) {
 		{
 			name: "dry run preserves .claude directory",
 			setup: func(dir string) {
-				claudeDir := filepath.Join(dir, ".claude")
-				os.Mkdir(claudeDir, 0755)
+				os.Mkdir(filepath.Join(dir, ".claude"), 0755)
 			},
 			dryRun:      true,
 			shouldExist: true,
@@ -88,16 +91,13 @@ func TestCleanClaudeDirectory(t *testing.T) {
 			tmpDir := t.TempDir()
 			tt.setup(tmpDir)
 
-			cleaner := New(tmpDir, tt.dryRun, false, false)
-			err := cleaner.CleanClaudeDirectory()
-			if err != nil {
-				t.Fatalf("CleanClaudeDirectory() error = %v", err)
+			c := newTestCleaner(tmpDir, tt.dryRun)
+			if err := c.CleanAIArtifacts(); err != nil {
+				t.Fatalf("CleanAIArtifacts() error = %v", err)
 			}
 
-			claudeDir := filepath.Join(tmpDir, ".claude")
-			_, err = os.Stat(claudeDir)
+			_, err := os.Stat(filepath.Join(tmpDir, ".claude"))
 			exists := !os.IsNotExist(err)
-
 			if exists != tt.shouldExist {
 				t.Errorf("directory exists = %v, want %v", exists, tt.shouldExist)
 			}
@@ -105,11 +105,72 @@ func TestCleanClaudeDirectory(t *testing.T) {
 	}
 }
 
+func TestCleanAIArtifactsRemovesAllAgentDirs(t *testing.T) {
+	tmpDir := t.TempDir()
+	for _, d := range []string{".claude", ".codex", ".cursor", ".continue", ".aider"} {
+		if err := os.Mkdir(filepath.Join(tmpDir, d), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c := newTestCleaner(tmpDir, false)
+	if err := c.CleanAIArtifacts(); err != nil {
+		t.Fatalf("CleanAIArtifacts() error = %v", err)
+	}
+	for _, d := range []string{".claude", ".codex", ".cursor", ".continue", ".aider"} {
+		if _, err := os.Stat(filepath.Join(tmpDir, d)); !os.IsNotExist(err) {
+			t.Errorf("expected %s to be removed", d)
+		}
+	}
+}
+
+func TestCleanAIArtifactsRemovesAgentFiles(t *testing.T) {
+	tmpDir := t.TempDir()
+	files := map[string]string{
+		"CLAUDE.md":                       "instructions",
+		"AGENTS.md":                       "agent guide",
+		".mcp.json":                       "{}",
+		".claude.json":                    "{}",
+		".claudeignore":                   "",
+		".cursorrules":                    "rules",
+		".cursorignore":                   "",
+		".aider.conf.yml":                 "model: gpt-4",
+		".aider.input.history":            "history",
+		".aider.chat.history.md":          "chat",
+		"docs/CLAUDE.md":                  "nested instructions",
+		".github/copilot-instructions.md": "copilot",
+		"src/legitimate.go":               "package src",
+		"README.md":                       "# project",
+	}
+	setupTestFiles(t, tmpDir, files)
+
+	c := newTestCleaner(tmpDir, false)
+	if err := c.CleanAIArtifacts(); err != nil {
+		t.Fatalf("CleanAIArtifacts() error = %v", err)
+	}
+
+	shouldBeGone := []string{
+		"CLAUDE.md", "AGENTS.md", ".mcp.json", ".claude.json",
+		".claudeignore", ".cursorrules", ".cursorignore",
+		".aider.conf.yml", ".aider.input.history", ".aider.chat.history.md",
+		"docs/CLAUDE.md", ".github/copilot-instructions.md",
+	}
+	for _, f := range shouldBeGone {
+		if _, err := os.Stat(filepath.Join(tmpDir, f)); !os.IsNotExist(err) {
+			t.Errorf("expected %s to be removed", f)
+		}
+	}
+	shouldStay := []string{"src/legitimate.go", "README.md"}
+	for _, f := range shouldStay {
+		if _, err := os.Stat(filepath.Join(tmpDir, f)); os.IsNotExist(err) {
+			t.Errorf("expected %s to be preserved", f)
+		}
+	}
+}
+
 func TestCleanMarkdownFiles(t *testing.T) {
 	tests := []struct {
 		name           string
 		files          map[string]string
-		expectedCount  int
 		shouldExist    []string
 		shouldNotExist []string
 	}{
@@ -121,7 +182,6 @@ func TestCleanMarkdownFiles(t *testing.T) {
 				"main.go":       "package main",
 				"CHANGELOG.md":  "# Changes",
 			},
-			expectedCount:  1,
 			shouldExist:    []string{"main.go", "README.md", "docs/guide.md"},
 			shouldNotExist: []string{"CHANGELOG.md"},
 		},
@@ -134,19 +194,17 @@ func TestCleanMarkdownFiles(t *testing.T) {
 				"adr/001-decision.md": "# ADR",
 				"src/notes.md":        "# Notes",
 			},
-			expectedCount:  1,
 			shouldExist:    []string{"vendor/lib.md", "node_modules/pkg.md", "doc/api.md", "adr/001-decision.md"},
 			shouldNotExist: []string{"src/notes.md"},
 		},
 		{
-			name: "case insensitive README detection",
+			name: "case insensitive README detection at root only",
 			files: map[string]string{
 				"readme.md":  "# Test",
 				"README.MD":  "# Test",
 				"guide.Md":   "# Guide",
 				"src/doc.md": "# Doc",
 			},
-			expectedCount:  2,
 			shouldExist:    []string{"readme.md", "README.MD"},
 			shouldNotExist: []string{"guide.Md", "src/doc.md"},
 		},
@@ -158,7 +216,6 @@ func TestCleanMarkdownFiles(t *testing.T) {
 				"src/lib/notes.md":    "# Notes",
 				"docs/internal/db.md": "# DB",
 			},
-			expectedCount:  2,
 			shouldExist:    []string{"README.md", "docs/internal/db.md"},
 			shouldNotExist: []string{"src/README.md", "src/lib/notes.md"},
 		},
@@ -169,22 +226,18 @@ func TestCleanMarkdownFiles(t *testing.T) {
 			tmpDir := t.TempDir()
 			setupTestFiles(t, tmpDir, tt.files)
 
-			cleaner := New(tmpDir, false, false, false)
-			err := cleaner.CleanMarkdownFiles()
-			if err != nil {
+			c := newTestCleaner(tmpDir, false)
+			if err := c.CleanMarkdownFiles(); err != nil {
 				t.Fatalf("CleanMarkdownFiles() error = %v", err)
 			}
 
 			for _, file := range tt.shouldExist {
-				path := filepath.Join(tmpDir, file)
-				if _, err := os.Stat(path); os.IsNotExist(err) {
+				if _, err := os.Stat(filepath.Join(tmpDir, file)); os.IsNotExist(err) {
 					t.Errorf("expected file to exist: %s", file)
 				}
 			}
-
 			for _, file := range tt.shouldNotExist {
-				path := filepath.Join(tmpDir, file)
-				if _, err := os.Stat(path); !os.IsNotExist(err) {
+				if _, err := os.Stat(filepath.Join(tmpDir, file)); !os.IsNotExist(err) {
 					t.Errorf("expected file to not exist: %s", file)
 				}
 			}
@@ -200,154 +253,172 @@ func TestCleanMarkdownFilesDryRun(t *testing.T) {
 	}
 	setupTestFiles(t, tmpDir, files)
 
-	cleaner := New(tmpDir, true, false, false)
-	err := cleaner.CleanMarkdownFiles()
-	if err != nil {
+	c := newTestCleaner(tmpDir, true)
+	if err := c.CleanMarkdownFiles(); err != nil {
 		t.Fatalf("CleanMarkdownFiles() error = %v", err)
 	}
-
-	// Files should still exist in dry run mode
 	for file := range files {
-		path := filepath.Join(tmpDir, file)
-		if _, err := os.Stat(path); os.IsNotExist(err) {
+		if _, err := os.Stat(filepath.Join(tmpDir, file)); os.IsNotExist(err) {
 			t.Errorf("expected file to still exist in dry run: %s", file)
 		}
 	}
 }
 
-func TestCleanSourceComments(t *testing.T) {
+func TestCleanSourceCommentsStandaloneAndInline(t *testing.T) {
 	tests := []struct {
-		name            string
-		file            string
-		content         string
-		expectedContent string
-		shouldModify    bool
+		name     string
+		file     string
+		input    string
+		expected string
 	}{
 		{
-			name: "removes single line Claude comment",
+			name: "standalone Claude comment removed",
 			file: "main.go",
-			content: `package main
+			input: `package main
 
-// This is a normal comment
+// Generated by Claude
+// Normal comment
 func main() {}
 `,
-			expectedContent: `package main
+			expected: `package main
 
-// This is a normal comment
+// Normal comment
 func main() {}
 `,
-			shouldModify: true,
 		},
 		{
-			name: "removes Claude mention",
-			file: "test.go",
-			content: `package test
+			name: "inline Claude comment stripped, code preserved",
+			file: "main.go",
+			input: `package main
 
-func test() {}
+func main() {
+	x := compute() // generated by Claude
+	_ = x
+}
 `,
-			expectedContent: `package test
+			expected: `package main
 
-func test() {}
+func main() {
+	x := compute()
+	_ = x
+}
 `,
-			shouldModify: true,
 		},
 		{
-			name: "removes Anthropic reference",
+			name: "multi-line JSDoc block removed",
 			file: "app.js",
-			content: `// Normal comment
-function test() {}
+			input: `/**
+ * Generated by Claude.
+ * Helper function.
+ */
+function foo() {}
 `,
-			expectedContent: `// Normal comment
-function test() {}
+			expected: `function foo() {}
 `,
-			shouldModify: true,
 		},
 		{
-			name: "removes AI assisted comment",
-			file: "util.py",
-			content: `# Helper function
-def helper():
-    pass
-`,
-			expectedContent: `# Helper function
-def helper():
-    pass
-`,
-			shouldModify: true,
-		},
-		{
-			name: "removes Python Claude comment",
+			name: "Python docstring with Codex removed",
 			file: "script.py",
-			content: `# Normal comment
-def main():
-    pass
+			input: `def foo():
+    """Generated by Codex."""
+    return 1
 `,
-			expectedContent: `# Normal comment
-def main():
-    pass
+			expected: `def foo():
+    return 1
 `,
-			shouldModify: true,
 		},
 		{
-			name: "case insensitive matching",
-			file: "test.js",
-			content: `// normal comment
-const x = 1;
+			name: "ChatGPT inline Python comment",
+			file: "script.py",
+			input: `x = 1  # generated by ChatGPT
+y = 2
 `,
-			expectedContent: `// normal comment
-const x = 1;
+			expected: `x = 1
+y = 2
 `,
-			shouldModify: true,
 		},
 		{
-			name: "no Claude comments",
+			name: "OpenAI session URL in comment",
+			file: "app.ts",
+			input: `// see https://chatgpt.com/session/abc
+const x = 1;
+`,
+			expected: `const x = 1;
+`,
+		},
+		{
+			name: "claude.ai URL in comment",
+			file: "lib.go",
+			input: `package lib
+
+// see https://claude.ai/code/session_01H
+func F() {}
+`,
+			expected: `package lib
+
+func F() {}
+`,
+		},
+		{
+			name: "comment-like substring inside string preserved",
+			file: "main.go",
+			input: `package main
+
+func main() {
+	s := "// generated by Claude"
+	_ = s
+}
+`,
+			expected: `package main
+
+func main() {
+	s := "// generated by Claude"
+	_ = s
+}
+`,
+		},
+		{
+			name: "no AI comments leaves file untouched",
 			file: "clean.go",
-			content: `package main
+			input: `package main
 
 // Regular comment
 func test() {}
 `,
-			expectedContent: `package main
+			expected: `package main
 
 // Regular comment
 func test() {}
 `,
-			shouldModify: false,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			tmpDir := t.TempDir()
-			filePath := filepath.Join(tmpDir, tt.file)
-
-			dir := filepath.Dir(filePath)
-			if dir != tmpDir {
-				os.MkdirAll(dir, 0755)
+			fp := filepath.Join(tmpDir, tt.file)
+			if err := os.WriteFile(fp, []byte(tt.input), 0644); err != nil {
+				t.Fatal(err)
 			}
 
-			os.WriteFile(filePath, []byte(tt.content), 0644)
-
-			cleaner := New(tmpDir, false, false, false)
-			err := cleaner.CleanSourceComments()
-			if err != nil {
+			c := newTestCleaner(tmpDir, false)
+			if err := c.CleanSourceComments(); err != nil {
 				t.Fatalf("CleanSourceComments() error = %v", err)
 			}
 
-			result, err := os.ReadFile(filePath)
+			out, err := os.ReadFile(fp)
 			if err != nil {
-				t.Fatalf("failed to read result file: %v", err)
+				t.Fatal(err)
 			}
-
-			resultStr := string(result)
-			if resultStr != tt.expectedContent {
-				t.Errorf("content mismatch:\ngot:\n%s\nwant:\n%s", resultStr, tt.expectedContent)
+			if string(out) != tt.expected {
+				t.Errorf("content mismatch:\ngot:\n%q\nwant:\n%q", string(out), tt.expected)
 			}
 		})
 	}
 }
 
 func TestCleanCommitMessage(t *testing.T) {
+	patterns := CompiledCommitMessagePatterns()
 	tests := []struct {
 		name     string
 		input    string
@@ -363,13 +434,30 @@ Co-Authored-By: Claude <noreply@anthropic.com>
 `,
 		},
 		{
-			name: "removes Generated with Claude Code",
-			input: `Add new feature
+			name: "removes claude.ai/code session URL",
+			input: `Add feature
 
-
-Co-Authored-By: Claude <noreply@anthropic.com>
+https://claude.ai/code/session_01HKABCDEF
 `,
-			expected: `Add new feature
+			expected: `Add feature
+`,
+		},
+		{
+			name: "removes Codex co-author",
+			input: `Refactor api
+
+Co-Authored-By: Codex <codex@openai.com>
+`,
+			expected: `Refactor api
+`,
+		},
+		{
+			name: "removes chatgpt.com link",
+			input: `Improve docs
+
+See: https://chatgpt.com/share/xyz
+`,
+			expected: `Improve docs
 `,
 		},
 		{
@@ -384,11 +472,13 @@ Added examples and clarifications.
 `,
 		},
 		{
-			name: "removes multiple Claude references",
+			name: "removes multiple references across vendors",
 			input: `Initial commit
 
 Generated with Claude Code
 Co-Authored-By: Claude <noreply@anthropic.com>
+Co-Authored-By: ChatGPT <noreply@openai.com>
+https://claude.ai/code/session_X
 `,
 			expected: `Initial commit
 `,
@@ -397,9 +487,7 @@ Co-Authored-By: Claude <noreply@anthropic.com>
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cleaner := New("", false, false, false)
-			result := cleaner.cleanCommitMessage(tt.input)
-
+			result := cleanCommitMessage(tt.input, patterns)
 			if result != tt.expected {
 				t.Errorf("cleanCommitMessage() mismatch:\ngot:\n%q\nwant:\n%q", result, tt.expected)
 			}
@@ -408,17 +496,12 @@ Co-Authored-By: Claude <noreply@anthropic.com>
 }
 
 func TestCleanGitHistory(t *testing.T) {
-	// Skip if git is not available
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
 
 	tmpDir := t.TempDir()
-
-	// Initialize git repo
-	runGit(t, tmpDir, "init")
-	runGit(t, tmpDir, "config", "user.email", "test@example.com")
-	runGit(t, tmpDir, "config", "user.name", "Test User")
+	initTestRepo(t, tmpDir)
 
 	testFile := filepath.Join(tmpDir, "test.txt")
 	os.WriteFile(testFile, []byte("test content"), 0644)
@@ -427,29 +510,27 @@ func TestCleanGitHistory(t *testing.T) {
 	commitMsg := `Initial commit
 
 Co-Authored-By: Claude <noreply@anthropic.com>
+https://claude.ai/code/session_01H
 `
 	runGit(t, tmpDir, "commit", "-m", commitMsg)
 
-	// Clean the history
-	cleaner := New(tmpDir, false, false, false)
-	cleaner.SetSkipHistoryPrompt(true) // Skip prompt for testing
-	err := cleaner.CleanGitHistory()
-	if err != nil {
+	c := newTestCleaner(tmpDir, false)
+	c.SetSkipHistoryPrompt(true)
+	if err := c.CleanGitHistory(); err != nil {
 		t.Fatalf("CleanGitHistory() error = %v", err)
 	}
 
-	// Get the commit message
 	cmd := exec.Command("git", "-C", tmpDir, "log", "--format=%B", "-n", "1")
 	output, err := cmd.Output()
 	if err != nil {
 		t.Fatalf("failed to get commit message: %v", err)
 	}
-
 	result := string(output)
-	if strings.Contains(result, "Claude") || strings.Contains(result, "Co-Authored-By") {
-		t.Errorf("commit message still contains Claude references:\n%s", result)
+	if strings.Contains(result, "Claude") ||
+		strings.Contains(result, "Co-Authored-By") ||
+		strings.Contains(result, "claude.ai") {
+		t.Errorf("commit message still contains AI references:\n%s", result)
 	}
-
 	if !strings.Contains(result, "Initial commit") {
 		t.Errorf("commit message lost original content:\n%s", result)
 	}
@@ -461,32 +542,21 @@ func TestCleanGitHistoryDryRun(t *testing.T) {
 	}
 
 	tmpDir := t.TempDir()
-
-	// Initialize git repo
-	runGit(t, tmpDir, "init")
-	runGit(t, tmpDir, "config", "user.email", "test@example.com")
-	runGit(t, tmpDir, "config", "user.name", "Test User")
+	initTestRepo(t, tmpDir)
 
 	testFile := filepath.Join(tmpDir, "test.txt")
 	os.WriteFile(testFile, []byte("test"), 0644)
 	runGit(t, tmpDir, "add", "test.txt")
 	runGit(t, tmpDir, "commit", "-m", "Test\n\nCo-Authored-By: Claude <noreply@anthropic.com>")
 
-	// Get original commit hash
-	cmd := exec.Command("git", "-C", tmpDir, "rev-parse", "HEAD")
-	origHash, _ := cmd.Output()
+	origHash, _ := exec.Command("git", "-C", tmpDir, "rev-parse", "HEAD").Output()
 
-	// Run dry run
-	cleaner := New(tmpDir, true, false, false)
-	err := cleaner.CleanGitHistory()
-	if err != nil {
+	c := newTestCleaner(tmpDir, true)
+	if err := c.CleanGitHistory(); err != nil {
 		t.Fatalf("CleanGitHistory() error = %v", err)
 	}
 
-	// Commit hash should be unchanged
-	cmd = exec.Command("git", "-C", tmpDir, "rev-parse", "HEAD")
-	newHash, _ := cmd.Output()
-
+	newHash, _ := exec.Command("git", "-C", tmpDir, "rev-parse", "HEAD").Output()
 	if string(origHash) != string(newHash) {
 		t.Errorf("commit hash changed in dry run mode")
 	}
@@ -498,27 +568,33 @@ func TestCleanGitHistoryNoCommits(t *testing.T) {
 	}
 
 	tmpDir := t.TempDir()
-	runGit(t, tmpDir, "init")
+	initTestRepo(t, tmpDir)
 
-	cleaner := New(tmpDir, false, false, false)
-	err := cleaner.CleanGitHistory()
-	if err != nil {
+	c := newTestCleaner(tmpDir, false)
+	if err := c.CleanGitHistory(); err != nil {
 		t.Errorf("CleanGitHistory() with no commits should not error: %v", err)
 	}
 }
 
-// Helper functions
+// initTestRepo creates a fresh git repo at dir with signing disabled and a
+// known author. Needed in environments that otherwise force commit signing.
+func initTestRepo(t *testing.T, dir string) {
+	t.Helper()
+	runGit(t, dir, "init")
+	runGit(t, dir, "config", "user.email", "test@example.com")
+	runGit(t, dir, "config", "user.name", "Test User")
+	runGit(t, dir, "config", "commit.gpgsign", "false")
+	runGit(t, dir, "config", "tag.gpgsign", "false")
+	runGit(t, dir, "config", "gpg.format", "openpgp")
+}
 
 func setupTestFiles(t *testing.T, baseDir string, files map[string]string) {
 	t.Helper()
 	for path, content := range files {
 		fullPath := filepath.Join(baseDir, path)
-		dir := filepath.Dir(fullPath)
-
-		if err := os.MkdirAll(dir, 0755); err != nil {
-			t.Fatalf("failed to create directory %s: %v", dir, err)
+		if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
+			t.Fatalf("failed to create directory: %v", err)
 		}
-
 		if err := os.WriteFile(fullPath, []byte(content), 0644); err != nil {
 			t.Fatalf("failed to write file %s: %v", path, err)
 		}
