@@ -1,68 +1,70 @@
 package cleaner
 
 import (
-	"bufio"
-	"bytes"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strings"
+
+	"go.uber.org/zap"
 )
 
+// Cleaner is the orchestrator for repository scrubbing. One instance handles
+// one run against one repoDir; instances are not safe for concurrent use.
 type Cleaner struct {
-	repoDir         string
-	dryRun          bool
-	verbose         bool
-	interactive     bool
-	yesToAll        bool
+	repoDir           string
+	dryRun            bool
+	interactive       bool
+	yesToAll          bool
 	skipHistoryPrompt bool
+	purgeRefs         bool
+	log               *zap.Logger
 }
 
-// New creates a new Cleaner instance.
-func New(repoDir string, dryRun, verbose, interactive bool) *Cleaner {
+// Options configure New.
+type Options struct {
+	DryRun      bool
+	Interactive bool
+	PurgeRefs   bool
+	Logger      *zap.Logger
+}
+
+// New creates a Cleaner. If Options.Logger is nil, a no-op logger is used.
+func New(repoDir string, opts Options) *Cleaner {
+	log := opts.Logger
+	if log == nil {
+		log = zap.NewNop()
+	}
 	return &Cleaner{
-		repoDir:           repoDir,
-		dryRun:            dryRun,
-		verbose:           verbose,
-		interactive:       interactive,
-		yesToAll:          false,
-		skipHistoryPrompt: false,
+		repoDir:     repoDir,
+		dryRun:      opts.DryRun,
+		interactive: opts.Interactive,
+		purgeRefs:   opts.PurgeRefs,
+		log:         log,
 	}
 }
 
-// SetSkipHistoryPrompt sets whether to skip the git history rewrite confirmation.
-// This is primarily for testing purposes.
-func (c *Cleaner) SetSkipHistoryPrompt(skip bool) {
-	c.skipHistoryPrompt = skip
-}
+// SetSkipHistoryPrompt suppresses the interactive confirmation before history
+// rewrite. Intended for tests.
+func (c *Cleaner) SetSkipHistoryPrompt(skip bool) { c.skipHistoryPrompt = skip }
 
-// IsGitRepo checks if the given directory is a git repository.
+// IsGitRepo reports whether dir contains a .git directory.
 func IsGitRepo(dir string) bool {
-	gitDir := filepath.Join(dir, ".git")
-	info, err := os.Stat(gitDir)
+	info, err := os.Stat(filepath.Join(dir, ".git"))
 	if err != nil {
 		return false
 	}
 	return info.IsDir()
 }
 
-// promptForDeletion asks the user whether to delete a file.
-// Returns true if the file should be deleted, false otherwise.
 func (c *Cleaner) promptForDeletion(relPath string) bool {
 	if c.yesToAll {
 		return true
 	}
-
 	fmt.Printf("\nDelete %s? [y/N/a] (y=yes, n=no, a=yes to all): ", relPath)
-
 	var response string
 	fmt.Scanln(&response)
-
-	response = strings.ToLower(strings.TrimSpace(response))
-
-	switch response {
+	switch strings.ToLower(strings.TrimSpace(response)) {
 	case "a", "all":
 		c.yesToAll = true
 		return true
@@ -73,515 +75,243 @@ func (c *Cleaner) promptForDeletion(relPath string) bool {
 	}
 }
 
-func (c *Cleaner) CleanClaudeDirectory() error {
-	claudeDir := filepath.Join(c.repoDir, ".claude")
+// dirAlwaysSkipped reports directories that are never traversed — these are
+// either source-control internals (.git) or dependency caches whose contents
+// the user did not author. AI-tool directories like .claude and .codex are
+// removed wholesale by CleanAIArtifacts and therefore also listed here so
+// that subsequent walks don't visit their interior.
+func dirAlwaysSkipped(name string) bool {
+	switch name {
+	case ".git", "node_modules", "vendor",
+		".claude", ".codex", ".cursor", ".continue", ".aider":
+		return true
+	}
+	return false
+}
 
-	info, err := os.Stat(claudeDir)
-	if err != nil {
-		if os.IsNotExist(err) {
+// CleanAIArtifacts removes directories and specific files left behind by AI
+// coding tools — Claude Code, Codex CLI, Cursor, Continue, Aider, Copilot.
+// These artifacts apply everywhere in the tree (no docs/ allowlist), since
+// they are tooling, not user-authored documentation.
+func (c *Cleaner) CleanAIArtifacts() error {
+	dirs := []string{".claude", ".codex", ".cursor", ".continue", ".aider"}
+	for _, d := range dirs {
+		path := filepath.Join(c.repoDir, d)
+		info, err := os.Stat(path)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return err
+		}
+		if !info.IsDir() {
+			continue
+		}
+		c.log.Info("removing ai tool directory", zap.String("path", d))
+		if !c.dryRun {
+			if err := os.RemoveAll(path); err != nil {
+				return fmt.Errorf("failed to remove %s: %w", d, err)
+			}
+		}
+	}
+
+	// File names removed wherever they appear in the tree (subject to
+	// dirAlwaysSkipped). Distinct from CleanMarkdownFiles because these
+	// must override the docs/doc/adr allowlist.
+	targetFiles := map[string]bool{
+		"CLAUDE.md":              true,
+		"AGENTS.md":              true,
+		".mcp.json":              true,
+		".claude.json":           true,
+		".claudeignore":          true,
+		".cursorrules":           true,
+		".cursorignore":          true,
+		".aider.conf.yml":        true,
+		".aider.input.history":   true,
+		".aider.chat.history.md": true,
+	}
+	specificPaths := []string{
+		filepath.Join(".github", "copilot-instructions.md"),
+	}
+
+	var matches []string
+	err := filepath.Walk(c.repoDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			if dirAlwaysSkipped(info.Name()) {
+				return filepath.SkipDir
+			}
 			return nil
 		}
+		if targetFiles[info.Name()] {
+			matches = append(matches, path)
+		}
+		return nil
+	})
+	if err != nil {
 		return err
 	}
-
-	if !info.IsDir() {
-		return nil
-	}
-
-	if c.verbose {
-		fmt.Println("Removing .claude directory")
-	}
-
-	if !c.dryRun {
-		if err := os.RemoveAll(claudeDir); err != nil {
-			return fmt.Errorf("failed to remove .claude directory: %w", err)
+	for _, p := range specificPaths {
+		full := filepath.Join(c.repoDir, p)
+		if _, err := os.Stat(full); err == nil {
+			matches = append(matches, full)
 		}
 	}
 
-	fmt.Println("Removed .claude directory")
+	for _, m := range matches {
+		rel, _ := filepath.Rel(c.repoDir, m)
+		c.log.Info("removing ai tool file", zap.String("path", rel))
+		if !c.dryRun {
+			if err := os.Remove(m); err != nil {
+				return fmt.Errorf("failed to remove %s: %w", rel, err)
+			}
+		}
+	}
 	return nil
 }
 
-// CleanMarkdownFiles removes markdown files from the repository.
-// It recursively walks the directory tree and removes all .md files,
-// excluding certain directories like .git, node_modules, vendor, docs, doc, and adr.
-// The root README.md is also preserved.
+// markdownAllowlistDirs are documentation directories whose generic .md files
+// are preserved by CleanMarkdownFiles. AI-tool files (CLAUDE.md, AGENTS.md)
+// inside these are NOT preserved — they're removed by CleanAIArtifacts, which
+// runs first and uses a separate allowlist that does not include these dirs.
+func markdownAllowlistDirs() map[string]bool {
+	return map[string]bool{
+		"docs": true, "doc": true, "adr": true,
+	}
+}
+
+// CleanMarkdownFiles removes .md files outside the documentation allowlist,
+// preserving the root README.md. Files owned by CleanAIArtifacts (CLAUDE.md,
+// AGENTS.md, .aider.chat.history.md, copilot-instructions.md) are not
+// reported here to avoid duplicate output in dry-run mode.
 func (c *Cleaner) CleanMarkdownFiles() error {
-	excludeDirs := map[string]bool{
-		".git":         true,
-		".claude":      true,
-		"node_modules": true,
-		"vendor":       true,
-		"docs":         true,
-		"doc":          true,
-		"adr":          true,
+	allow := markdownAllowlistDirs()
+	ownedByArtifacts := map[string]bool{
+		"claude.md":               true,
+		"agents.md":               true,
+		".aider.chat.history.md":  true,
+		"copilot-instructions.md": true,
 	}
 
 	var filesToRemove []string
-
 	err := filepath.Walk(c.repoDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
-
-		// Skip excluded directories
 		if info.IsDir() {
-			if excludeDirs[info.Name()] {
+			if dirAlwaysSkipped(info.Name()) || allow[info.Name()] {
 				return filepath.SkipDir
 			}
 			return nil
 		}
-
-		// Check if it's a markdown file
-		if strings.HasSuffix(strings.ToLower(info.Name()), ".md") {
-			// Preserve root README.md
-			if filepath.Dir(path) == c.repoDir && strings.ToLower(info.Name()) == "readme.md" {
-				return nil
-			}
-			filesToRemove = append(filesToRemove, path)
+		name := strings.ToLower(info.Name())
+		if !strings.HasSuffix(name, ".md") {
+			return nil
 		}
-
+		if ownedByArtifacts[name] {
+			return nil
+		}
+		if filepath.Dir(path) == c.repoDir && name == "readme.md" {
+			return nil
+		}
+		filesToRemove = append(filesToRemove, path)
 		return nil
 	})
-
 	if err != nil {
 		return err
 	}
 
-	// Remove the files
-	removedCount := 0
-	skippedCount := 0
-
+	removed, skipped := 0, 0
 	for _, file := range filesToRemove {
-		relPath, _ := filepath.Rel(c.repoDir, file)
-
-		// In interactive mode, prompt for each file
+		rel, _ := filepath.Rel(c.repoDir, file)
 		if c.interactive && !c.dryRun {
-			if !c.promptForDeletion(relPath) {
-				skippedCount++
-				if c.verbose {
-					fmt.Printf("Skipped: %s\n", relPath)
-				}
+			if !c.promptForDeletion(rel) {
+				skipped++
+				c.log.Debug("skipped markdown file", zap.String("path", rel))
 				continue
 			}
 		}
-
-		if c.verbose || (c.interactive && !c.yesToAll) {
-			fmt.Printf("Removing markdown file: %s\n", relPath)
-		}
-
+		c.log.Info("removing markdown file", zap.String("path", rel))
 		if !c.dryRun {
 			if err := os.Remove(file); err != nil {
-				return fmt.Errorf("failed to remove %s: %w", relPath, err)
+				return fmt.Errorf("failed to remove %s: %w", rel, err)
 			}
 		}
-		removedCount++
+		removed++
 	}
-
-	if removedCount > 0 {
-		fmt.Printf("Removed %d markdown file(s)\n", removedCount)
+	if removed > 0 {
+		c.log.Info("markdown removal summary", zap.Int("removed", removed))
 	}
-	if skippedCount > 0 {
-		fmt.Printf("Skipped %d markdown file(s)\n", skippedCount)
+	if skipped > 0 {
+		c.log.Info("markdown skip summary", zap.Int("skipped", skipped))
 	}
-
 	return nil
 }
 
-// It processes common source file extensions and removes comments that
+var sourceExtensions = []string{
+	".go", ".js", ".ts", ".jsx", ".tsx",
+	".py", ".java", ".c", ".cpp", ".h", ".hpp",
+	".rs", ".rb", ".php", ".cs",
+}
+
+// CleanSourceComments strips AI-related comments from source files. Inline
+// comments preserve the code they trail; standalone comments cause the line
+// to be dropped; multi-line block comments are removed as a unit; runs of
+// blank lines produced by removal are collapsed to one.
 func (c *Cleaner) CleanSourceComments() error {
-	extensions := []string{".go", ".js", ".ts", ".jsx", ".tsx", ".py", ".java", ".c", ".cpp", ".h", ".hpp", ".rs", ".rb", ".php", ".cs"}
-	excludeDirs := map[string]bool{
-		".git":         true,
-		"node_modules": true,
-		"vendor":       true,
-	}
-
-	claudePatterns := []*regexp.Regexp{
-		// Single-line comments with Claude/Anthropic
-		regexp.MustCompile(`(?i)//.*\bclaude\b`),
-		regexp.MustCompile(`(?i)#.*\bclaude\b`),
-		regexp.MustCompile(`(?i)//.*\banthropic\b`),
-		regexp.MustCompile(`(?i)#.*\banthropic\b`),
-		// Block comments
-		regexp.MustCompile(`(?i)/\*.*\bclaude\b.*\*/`),
-		regexp.MustCompile(`(?i)/\*\*.*\bclaude\b.*\*/`), // JSDoc style
-		regexp.MustCompile(`(?i)<!--.*\bclaude\b.*-->`),  // HTML comments
-		// AI assistance markers
-		regexp.MustCompile(`(?i)//.*\bai\s+(assisted|generated|created|powered)`),
-		regexp.MustCompile(`(?i)#.*\bai\s+(assisted|generated|created|powered)`),
-		regexp.MustCompile(`(?i)//.*\b(generated|created|built|powered)\s+(with|by)\b.*\bai\b`),
-		regexp.MustCompile(`(?i)#.*\b(generated|created|built|powered)\s+(with|by)\b.*\bai\b`),
-		regexp.MustCompile(`(?i)//.*\b(generated|assisted)\s+(with|by)\b`),
-		regexp.MustCompile(`(?i)#.*\b(generated|assisted)\s+(with|by)\b`),
-		// TODO/FIXME with AI mentions
-		regexp.MustCompile(`(?i)//.*\b(TODO|FIXME|NOTE|HACK).*\b(claude|anthropic|ai)\b`),
-		regexp.MustCompile(`(?i)#.*\b(TODO|FIXME|NOTE|HACK).*\b(claude|anthropic|ai)\b`),
-		// Trailing signatures
-		regexp.MustCompile(`(?i)//\s*-\s*(claude|anthropic)\b`),
-		regexp.MustCompile(`(?i)#\s*-\s*(claude|anthropic)\b`),
-		// Emoji patterns with AI/Claude
-		regexp.MustCompile(`(?i)[🤖🔧✨].*\b(claude|anthropic|ai)\b`),
-	}
-
-	var modifiedFiles int
+	aiPattern := CompiledCommentAIPattern()
+	modified := 0
 
 	err := filepath.Walk(c.repoDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
-
 		if info.IsDir() {
-			if excludeDirs[info.Name()] {
+			if dirAlwaysSkipped(info.Name()) {
 				return filepath.SkipDir
 			}
 			return nil
 		}
-
-		// Check if file has a relevant extension
-		hasExt := false
-		for _, ext := range extensions {
-			if strings.HasSuffix(strings.ToLower(info.Name()), ext) {
-				hasExt = true
-				break
-			}
-		}
-
-		if !hasExt {
+		ext := strings.ToLower(filepath.Ext(info.Name()))
+		if !hasExt(ext, sourceExtensions) {
 			return nil
 		}
-
-		// Process the file
-		modified, err := c.cleanFileComments(path, claudePatterns)
+		content, err := os.ReadFile(path)
 		if err != nil {
 			return err
 		}
-
-		if modified {
-			modifiedFiles++
-			if c.verbose {
-				relPath, _ := filepath.Rel(c.repoDir, path)
-				fmt.Printf("Cleaned comments in: %s\n", relPath)
-			}
+		newContent, changed := CleanCommentsInSource(content, ext, aiPattern)
+		if !changed {
+			return nil
 		}
-
-		return nil
+		rel, _ := filepath.Rel(c.repoDir, path)
+		c.log.Debug("cleaned comments", zap.String("path", rel))
+		modified++
+		if c.dryRun {
+			return nil
+		}
+		fi, err := os.Stat(path)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(path, newContent, fi.Mode())
 	})
-
 	if err != nil {
 		return err
 	}
-
-	if modifiedFiles > 0 {
-		fmt.Printf("Cleaned comments in %d file(s)\n", modifiedFiles)
+	if modified > 0 {
+		c.log.Info("source comment cleanup summary", zap.Int("files_modified", modified))
 	}
-
 	return nil
 }
 
-func (c *Cleaner) cleanFileComments(path string, patterns []*regexp.Regexp) (bool, error) {
-	content, err := os.ReadFile(path)
-	if err != nil {
-		return false, err
-	}
-
-	originalContent := content
-	lines := bytes.Split(content, []byte("\n"))
-	var newLines [][]byte
-	modified := false
-
-	for _, line := range lines {
-		shouldRemove := false
-		for _, pattern := range patterns {
-			if pattern.Match(line) {
-				shouldRemove = true
-				modified = true
-				break
-			}
-		}
-
-		if !shouldRemove {
-			newLines = append(newLines, line)
+func hasExt(ext string, list []string) bool {
+	for _, e := range list {
+		if e == ext {
+			return true
 		}
 	}
-
-	if !modified {
-		return false, nil
-	}
-
-	if !c.dryRun {
-		newContent := bytes.Join(newLines, []byte("\n"))
-		// Preserve original file permissions
-		info, err := os.Stat(path)
-		if err != nil {
-			return false, err
-		}
-
-		if err := os.WriteFile(path, newContent, info.Mode()); err != nil {
-			return false, err
-		}
-	}
-
-	// Double check if content actually changed
-	return !bytes.Equal(originalContent, bytes.Join(newLines, []byte("\n"))), nil
-}
-
-// This uses git filter-branch to rewrite commit messages, removing:
-func (c *Cleaner) CleanGitHistory() error {
-	// Check for unstaged changes first
-	statusCmd := exec.Command("git", "-C", c.repoDir, "status", "--porcelain")
-	statusOutput, err := statusCmd.Output()
-	if err != nil {
-		return fmt.Errorf("failed to check git status: %w", err)
-	}
-
-	if len(statusOutput) > 0 && !c.dryRun {
-		return fmt.Errorf("repository has unstaged changes - commit or stash them before rewriting history")
-	}
-
-	// Check if there are any commits
-	checkCmd := exec.Command("git", "-C", c.repoDir, "rev-list", "--count", "HEAD")
-	output, err := checkCmd.CombinedOutput()
-	if err != nil {
-		// No commits yet
-		if c.verbose {
-			fmt.Println("No commits to clean")
-		}
-		return nil
-	}
-
-	commitCount := strings.TrimSpace(string(output))
-	if commitCount == "0" {
-		if c.verbose {
-			fmt.Println("No commits to clean")
-		}
-		return nil
-	}
-
-	if c.verbose {
-		fmt.Println("Checking git commit history...")
-	}
-
-	// Get all commit hashes in reverse order (oldest first)
-	listCmd := exec.Command("git", "-C", c.repoDir, "rev-list", "--reverse", "HEAD")
-	output, err = listCmd.Output()
-	if err != nil {
-		return fmt.Errorf("failed to list commits: %w", err)
-	}
-
-	commits := strings.Split(strings.TrimSpace(string(output)), "\n")
-	if len(commits) == 0 {
-		return nil
-	}
-
-	modifiedCount := 0
-
-	for _, commit := range commits {
-		commit = strings.TrimSpace(commit)
-		if commit == "" {
-			continue
-		}
-
-		// Get the commit message
-		msgCmd := exec.Command("git", "-C", c.repoDir, "log", "--format=%B", "-n", "1", commit)
-		msgOutput, err := msgCmd.Output()
-		if err != nil {
-			return fmt.Errorf("failed to get commit message for %s: %w", commit, err)
-		}
-
-		originalMsg := string(msgOutput)
-		cleanedMsg := c.cleanCommitMessage(originalMsg)
-
-		// Normalize both for comparison (remove trailing empty lines from original too)
-		normalizedOriginal := c.normalizeMessage(originalMsg)
-
-		if normalizedOriginal != cleanedMsg {
-			modifiedCount++
-			if c.verbose {
-				shortHash := commit
-				if len(commit) > 7 {
-					shortHash = commit[:7]
-				}
-				fmt.Printf("Found AI traces in commit: %s\n", shortHash)
-			}
-		}
-	}
-
-	// Only prompt and rewrite if changes were found
-	if modifiedCount == 0 {
-		if c.verbose {
-			fmt.Println("No AI assistance traces found in commit history")
-		}
-		return nil
-	}
-
-	// Show what was found
-	if c.verbose || c.dryRun {
-		fmt.Printf("\nFound %d commit(s) with AI assistance traces\n", modifiedCount)
-	}
-
-	// In dry-run mode, just report and exit
-	if c.dryRun {
-		return nil
-	}
-
-	// Prompt for confirmation before rewriting (unless skipped for testing)
-	if !c.skipHistoryPrompt {
-		fmt.Printf("\nFound %d commit(s) with AI assistance traces.\n", modifiedCount)
-		fmt.Println("⚠️  WARNING: Rewriting git history is DESTRUCTIVE and PERMANENT!")
-		fmt.Println("This will change all commit hashes and cannot be undone.")
-		fmt.Print("\nProceed with git history rewrite? [y/N]: ")
-
-		var response string
-		fmt.Scanln(&response)
-		response = strings.ToLower(strings.TrimSpace(response))
-
-		if response != "y" && response != "yes" {
-			fmt.Println("Skipped git history rewriting.")
-			return nil
-		}
-	}
-
-	// Use git filter-repo approach via filter-branch
-	// Create a message filter script
-	filterScript := c.createMessageFilterScript()
-	defer os.Remove(filterScript)
-
-	fmt.Println("\nRewriting git history...")
-	cmd := exec.Command("git", "-C", c.repoDir, "filter-branch", "-f", "--msg-filter",
-		fmt.Sprintf("sh %s", filterScript), "--", "--all")
-
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("failed to rewrite git history: %w\nStderr: %s", err, stderr.String())
-	}
-
-	// Clean up backup refs
-	cleanupCmd := exec.Command("git", "-C", c.repoDir, "for-each-ref", "--format=%(refname)", "refs/original/")
-	refOutput, err := cleanupCmd.Output()
-	if err == nil && len(refOutput) > 0 {
-		refs := strings.Split(strings.TrimSpace(string(refOutput)), "\n")
-		for _, ref := range refs {
-			ref = strings.TrimSpace(ref)
-			if ref != "" {
-				exec.Command("git", "-C", c.repoDir, "update-ref", "-d", ref).Run()
-			}
-		}
-	}
-
-	// Cleanup reflog and gc
-	exec.Command("git", "-C", c.repoDir, "reflog", "expire", "--expire=now", "--all").Run()
-	exec.Command("git", "-C", c.repoDir, "gc", "--prune=now", "--aggressive").Run()
-
-	fmt.Printf("\nCleaned %d commit message(s)\n", modifiedCount)
-
-	return nil
-}
-
-// createMessageFilterScript creates a temporary shell script for git filter-branch.
-func (c *Cleaner) createMessageFilterScript() string {
-	tmpFile, err := os.CreateTemp("", "unclaude-filter-*.sh")
-	if err != nil {
-		return ""
-	}
-	defer tmpFile.Close()
-
-	script := `#!/bin/sh
-cat | sed -e '/Co-Authored-By:.*[Cc]laude/d' \
-          -e '/Co-Authored-By:.*anthropic\.com/d' \
-          -e '/[🤖🔧✨].*[Gg]enerated/d' \
-          -e '/[🤖🔧✨].*[Cc]laude/d' \
-          -e '/[🤖🔧✨].*[Aa]nthropic/d' \
-          -e '/Generated with.*[Cc]laude/d' \
-          -e '/Created (with|by).*[Cc]laude/d' \
-          -e '/Built (with|by).*[Cc]laude/d' \
-          -e '/Assisted by.*[Cc]laude/d' \
-          -e '/\[Claude Code\]/d' \
-          -e '/([Cc]laude [Cc]ode)/d' \
-          -e '/claude\.com/d' \
-          -e '/anthropic\.com/d' \
-          -e '/AI.assisted/d' \
-          -e '/AI.generated/d' \
-          -e '/AI.created/d' \
-          -e '/AI.powered/d' \
-          -e '/Generated.*by.*AI/d' \
-          -e '/Created.*by.*AI/d' \
-          -e '/Built.*by.*AI/d' \
-          -e '/Powered.*by.*AI/d' \
-          -e '/-.*[Cc]laude$/d' \
-          -e '/-.*[Aa]nthropic$/d'
-`
-	tmpFile.WriteString(script)
-	tmpFile.Chmod(0755)
-
-	return tmpFile.Name()
-}
-
-// normalizeMessage removes trailing empty lines from a commit message.
-func (c *Cleaner) normalizeMessage(msg string) string {
-	lines := strings.Split(msg, "\n")
-
-	// Remove trailing empty lines
-	for len(lines) > 0 && strings.TrimSpace(lines[len(lines)-1]) == "" {
-		lines = lines[:len(lines)-1]
-	}
-
-	return strings.Join(lines, "\n") + "\n"
-}
-
-func (c *Cleaner) cleanCommitMessage(msg string) string {
-	scanner := bufio.NewScanner(strings.NewReader(msg))
-	var lines []string
-
-	claudePatterns := []*regexp.Regexp{
-		// Co-authorship lines
-		regexp.MustCompile(`(?i)Co-Authored-By:\s*Claude\s*<.*@anthropic\.com>`),
-		regexp.MustCompile(`(?i)Co-Authored-By:.*@anthropic\.com`),
-		regexp.MustCompile(`(?i)Co-Authored-By:.*\bclaude\b.*`),
-		// Generation footers and badges
-		regexp.MustCompile(`(?i).*Generated with.*Claude.*`),
-		regexp.MustCompile(`(?i).*\[Claude Code\].*`),
-		regexp.MustCompile(`(?i).*\(Claude Code\).*`),
-		regexp.MustCompile(`(?i).*Created (with|by).*Claude.*`),
-		regexp.MustCompile(`(?i).*Built (with|by).*Claude.*`),
-		regexp.MustCompile(`(?i).*Assisted by.*Claude.*`),
-		// URLs and links
-		regexp.MustCompile(`(?i).*claude\.com.*`),
-		regexp.MustCompile(`(?i).*anthropic\.com.*`),
-		// Emoji badges
-		regexp.MustCompile(`🤖.*Claude.*`),
-		regexp.MustCompile(`🤖.*Anthropic.*`),
-		regexp.MustCompile(`(?i)[🤖🔧✨].*\b(generated|created|built|powered).*`),
-		// AI markers
-		regexp.MustCompile(`(?i).*AI\s+(assisted|generated|created|powered).*`),
-		regexp.MustCompile(`(?i).*AI-(assisted|generated|created|powered).*`),
-		regexp.MustCompile(`(?i).*(Generated|Created|Built|Powered)\s+(with|by)\s+AI.*`),
-		// Signed-off style
-		regexp.MustCompile(`(?i).*-\s*(Claude|Anthropic)(\s|$).*`),
-	}
-
-	for scanner.Scan() {
-		line := scanner.Text()
-		shouldRemove := false
-
-		for _, pattern := range claudePatterns {
-			if pattern.MatchString(line) {
-				shouldRemove = true
-				break
-			}
-		}
-
-		if !shouldRemove {
-			lines = append(lines, line)
-		}
-	}
-
-	// Remove trailing empty lines
-	for len(lines) > 0 && strings.TrimSpace(lines[len(lines)-1]) == "" {
-		lines = lines[:len(lines)-1]
-	}
-
-	return strings.Join(lines, "\n") + "\n"
+	return false
 }

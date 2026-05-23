@@ -6,34 +6,39 @@ import (
 
 	"github.com/antisynthesis/unclaude/internal/cleaner"
 	"github.com/spf13/cobra"
+	"go.uber.org/zap"
 )
 
 var (
 	apply       bool
 	verbose     bool
+	quiet       bool
+	jsonLog     bool
 	interactive bool
+	purgeRefs   bool
 	repoDir     string
 )
 
-// rootCmd represents the base command when called without any subcommands.
 var rootCmd = &cobra.Command{
 	Use:   "unclaude [path]",
-	Short: "Remove all traces of Claude Code assistance from a git repository",
-	Long: `unclaude removes all traces that Claude Code assisted in the development
-of a git repository. This includes:
-  - Removing .claude/ directory (commands, skills, configurations)
-  - Removing .md files (preserving root README.md and docs/, doc/, adr/ directories)
-  - Removing AI-related comments from source files (Claude, Anthropic, AI-assisted)
-  - Removing Co-Authored-By and generation footers from git commits
-  - Removing tool attribution links (claude.com, anthropic.com)
+	Short: "Remove AI coding-assistant traces from a git repository",
+	Long: `unclaude removes traces left behind by AI coding assistants — Claude Code,
+Codex CLI, Cursor, Continue, Aider, GitHub Copilot — from a git repository:
 
-By default, runs in preview mode (dry-run). Use --apply to make actual changes.`,
+  - AI tool directories: .claude/, .codex/, .cursor/, .continue/, .aider/
+  - AI tool files: CLAUDE.md, AGENTS.md, .mcp.json, .claude.json,
+                   .claudeignore, .cursorrules, .cursorignore,
+                   .aider.* files, .github/copilot-instructions.md
+  - Generic .md files (preserving root README.md and docs/, doc/, adr/)
+  - AI-related source comments (Claude, Anthropic, Codex, ChatGPT, OpenAI, AI-assisted)
+  - Co-Authored-By / generation footers / session URLs from commit messages
+    (claude.com, claude.ai, anthropic.com, chatgpt.com, openai.com)
+
+Runs in preview mode by default. Use --apply to make changes.`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: runClean,
 }
 
-// Execute adds all child commands to the root command and sets flags appropriately.
-// This is called by main.main(). It only needs to happen once to the rootCmd.
 func Execute() {
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
@@ -42,12 +47,14 @@ func Execute() {
 
 func init() {
 	rootCmd.Flags().BoolVar(&apply, "apply", false, "apply changes (default is preview/dry-run mode)")
-	rootCmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "show detailed output")
+	rootCmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "show debug-level output")
+	rootCmd.Flags().BoolVar(&quiet, "quiet", false, "suppress info-level output; only warnings and errors")
+	rootCmd.Flags().BoolVar(&jsonLog, "json", false, "emit logs as JSON instead of human-readable console")
 	rootCmd.Flags().BoolVarP(&interactive, "interactive", "i", false, "prompt before deleting each markdown file (requires --apply)")
+	rootCmd.Flags().BoolVar(&purgeRefs, "purge-refs", false, "after history rewrite, delete refs/original/ and run aggressive gc")
 }
 
 func runClean(cmd *cobra.Command, args []string) error {
-	// Determine repository directory
 	if len(args) > 0 {
 		repoDir = args[0]
 	} else {
@@ -58,56 +65,59 @@ func runClean(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Verify it's a git repository
 	if !cleaner.IsGitRepo(repoDir) {
 		return fmt.Errorf("%s is not a git repository", repoDir)
 	}
 
-	// Default to dry-run unless --apply is specified
 	dryRun := !apply
-
-	// Show mode banner
-	if dryRun {
-		fmt.Println("Running in PREVIEW mode (no changes will be made)")
-		fmt.Println("Use --apply to actually modify the repository")
-		fmt.Println()
-	} else {
-		fmt.Println("Running in APPLY mode - changes will be made")
-		fmt.Println()
-	}
-
-	// Interactive mode requires apply
 	if interactive && dryRun {
 		return fmt.Errorf("--interactive requires --apply flag")
 	}
 
-	c := cleaner.New(repoDir, dryRun, verbose, interactive)
+	format := cleaner.LogFormatConsole
+	if jsonLog {
+		format = cleaner.LogFormatJSON
+	}
+	log := cleaner.NewLogger(cleaner.LoggerOptions{
+		Verbose: verbose,
+		Quiet:   quiet,
+		Format:  format,
+	})
+	defer func() { _ = log.Sync() }()
 
-	if err := c.CleanClaudeDirectory(); err != nil {
-		return fmt.Errorf("failed to clean .claude directory: %w", err)
+	if dryRun {
+		log.Info("preview mode (no changes will be made); use --apply to modify the repository")
+	} else {
+		log.Info("apply mode (changes will be made)")
 	}
 
-	// Clean markdown files
-	if err := c.CleanMarkdownFiles(); err != nil {
-		return fmt.Errorf("failed to clean markdown files: %w", err)
-	}
+	c := cleaner.New(repoDir, cleaner.Options{
+		DryRun:      dryRun,
+		Interactive: interactive,
+		PurgeRefs:   purgeRefs,
+		Logger:      log,
+	})
 
-	// Clean source code comments
-	if err := c.CleanSourceComments(); err != nil {
-		return fmt.Errorf("failed to clean source comments: %w", err)
+	steps := []struct {
+		name string
+		fn   func() error
+	}{
+		{"clean ai tool artifacts", c.CleanAIArtifacts},
+		{"clean markdown files", c.CleanMarkdownFiles},
+		{"clean source comments", c.CleanSourceComments},
+		{"clean git history", c.CleanGitHistory},
 	}
-
-	// Clean git commit history
-	if err := c.CleanGitHistory(); err != nil {
-		return fmt.Errorf("failed to clean git history: %w", err)
+	for _, s := range steps {
+		if err := s.fn(); err != nil {
+			log.Error("step failed", zap.String("step", s.name), zap.Error(err))
+			return fmt.Errorf("%s: %w", s.name, err)
+		}
 	}
 
 	if dryRun {
-		fmt.Println("\n✓ Preview completed. No changes were made.")
-		fmt.Println("Run with --apply to make these changes permanent.")
+		log.Info("preview complete; no changes were made (run with --apply to make permanent)")
 	} else {
-		fmt.Println("\n✓ Repository cleaned successfully.")
+		log.Info("repository cleaned")
 	}
-
 	return nil
 }
