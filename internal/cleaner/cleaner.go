@@ -2,23 +2,24 @@ package cleaner
 
 import (
 	"fmt"
+	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
-
-	"go.uber.org/zap"
 )
 
 // Cleaner is the orchestrator for repository scrubbing. One instance handles
 // one run against one repoDir; instances are not safe for concurrent use.
 type Cleaner struct {
-	repoDir           string
-	dryRun            bool
-	interactive       bool
-	yesToAll          bool
-	skipHistoryPrompt bool
-	purgeRefs         bool
-	log               *zap.Logger
+	repoDir             string
+	dryRun              bool
+	interactive         bool
+	yesToAll            bool
+	skipHistoryPrompt   bool
+	purgeRefs           bool
+	normalizeTypography bool
+	log                 *slog.Logger
 }
 
 // Options configure New.
@@ -26,27 +27,28 @@ type Options struct {
 	DryRun      bool
 	Interactive bool
 	PurgeRefs   bool
-	Logger      *zap.Logger
+	// NormalizeTypography additionally folds visible "smart" punctuation
+	// (curly quotes, em/en dashes, ellipsis glyphs) in prose files back to
+	// plain ASCII. Off by default because it alters authored, visible content.
+	NormalizeTypography bool
+	Logger              *slog.Logger
 }
 
 // New creates a Cleaner. If Options.Logger is nil, a no-op logger is used.
 func New(repoDir string, opts Options) *Cleaner {
 	log := opts.Logger
 	if log == nil {
-		log = zap.NewNop()
+		log = newNopLogger()
 	}
 	return &Cleaner{
-		repoDir:     repoDir,
-		dryRun:      opts.DryRun,
-		interactive: opts.Interactive,
-		purgeRefs:   opts.PurgeRefs,
-		log:         log,
+		repoDir:             repoDir,
+		dryRun:              opts.DryRun,
+		interactive:         opts.Interactive,
+		purgeRefs:           opts.PurgeRefs,
+		normalizeTypography: opts.NormalizeTypography,
+		log:                 log,
 	}
 }
-
-// SetSkipHistoryPrompt suppresses the interactive confirmation before history
-// rewrite. Intended for tests.
-func (c *Cleaner) SetSkipHistoryPrompt(skip bool) { c.skipHistoryPrompt = skip }
 
 // IsGitRepo reports whether dir contains a .git directory.
 func IsGitRepo(dir string) bool {
@@ -75,7 +77,7 @@ func (c *Cleaner) promptForDeletion(relPath string) bool {
 	}
 }
 
-// dirAlwaysSkipped reports directories that are never traversed — these are
+// dirAlwaysSkipped reports directories that are never traversed - these are
 // either source-control internals (.git) or dependency caches whose contents
 // the user did not author. AI-tool directories like .claude and .codex are
 // removed wholesale by CleanAIArtifacts and therefore also listed here so
@@ -90,7 +92,7 @@ func dirAlwaysSkipped(name string) bool {
 }
 
 // CleanAIArtifacts removes directories and specific files left behind by AI
-// coding tools — Claude Code, Codex CLI, Cursor, Continue, Aider, Copilot.
+// coding tools - Claude Code, Codex CLI, Cursor, Continue, Aider, Copilot.
 // These artifacts apply everywhere in the tree (no docs/ allowlist), since
 // they are tooling, not user-authored documentation.
 func (c *Cleaner) CleanAIArtifacts() error {
@@ -107,7 +109,7 @@ func (c *Cleaner) CleanAIArtifacts() error {
 		if !info.IsDir() {
 			continue
 		}
-		c.log.Info("removing ai tool directory", zap.String("path", d))
+		c.log.Info("removing ai tool directory", slog.String("path", d))
 		if !c.dryRun {
 			if err := os.RemoveAll(path); err != nil {
 				return fmt.Errorf("failed to remove %s: %w", d, err)
@@ -135,17 +137,17 @@ func (c *Cleaner) CleanAIArtifacts() error {
 	}
 
 	var matches []string
-	err := filepath.Walk(c.repoDir, func(path string, info os.FileInfo, err error) error {
+	err := filepath.WalkDir(c.repoDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		if info.IsDir() {
-			if dirAlwaysSkipped(info.Name()) {
+		if d.IsDir() {
+			if dirAlwaysSkipped(d.Name()) {
 				return filepath.SkipDir
 			}
 			return nil
 		}
-		if targetFiles[info.Name()] {
+		if targetFiles[d.Name()] {
 			matches = append(matches, path)
 		}
 		return nil
@@ -162,7 +164,7 @@ func (c *Cleaner) CleanAIArtifacts() error {
 
 	for _, m := range matches {
 		rel, _ := filepath.Rel(c.repoDir, m)
-		c.log.Info("removing ai tool file", zap.String("path", rel))
+		c.log.Info("removing ai tool file", slog.String("path", rel))
 		if !c.dryRun {
 			if err := os.Remove(m); err != nil {
 				return fmt.Errorf("failed to remove %s: %w", rel, err)
@@ -174,7 +176,7 @@ func (c *Cleaner) CleanAIArtifacts() error {
 
 // markdownAllowlistDirs are documentation directories whose generic .md files
 // are preserved by CleanMarkdownFiles. AI-tool files (CLAUDE.md, AGENTS.md)
-// inside these are NOT preserved — they're removed by CleanAIArtifacts, which
+// inside these are NOT preserved - they're removed by CleanAIArtifacts, which
 // runs first and uses a separate allowlist that does not include these dirs.
 func markdownAllowlistDirs() map[string]bool {
 	return map[string]bool{
@@ -196,17 +198,17 @@ func (c *Cleaner) CleanMarkdownFiles() error {
 	}
 
 	var filesToRemove []string
-	err := filepath.Walk(c.repoDir, func(path string, info os.FileInfo, err error) error {
+	err := filepath.WalkDir(c.repoDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		if info.IsDir() {
-			if dirAlwaysSkipped(info.Name()) || allow[info.Name()] {
+		if d.IsDir() {
+			if dirAlwaysSkipped(d.Name()) || allow[d.Name()] {
 				return filepath.SkipDir
 			}
 			return nil
 		}
-		name := strings.ToLower(info.Name())
+		name := strings.ToLower(d.Name())
 		if !strings.HasSuffix(name, ".md") {
 			return nil
 		}
@@ -229,11 +231,11 @@ func (c *Cleaner) CleanMarkdownFiles() error {
 		if c.interactive && !c.dryRun {
 			if !c.promptForDeletion(rel) {
 				skipped++
-				c.log.Debug("skipped markdown file", zap.String("path", rel))
+				c.log.Debug("skipped markdown file", slog.String("path", rel))
 				continue
 			}
 		}
-		c.log.Info("removing markdown file", zap.String("path", rel))
+		c.log.Info("removing markdown file", slog.String("path", rel))
 		if !c.dryRun {
 			if err := os.Remove(file); err != nil {
 				return fmt.Errorf("failed to remove %s: %w", rel, err)
@@ -242,10 +244,10 @@ func (c *Cleaner) CleanMarkdownFiles() error {
 		removed++
 	}
 	if removed > 0 {
-		c.log.Info("markdown removal summary", zap.Int("removed", removed))
+		c.log.Info("markdown removal summary", slog.Int("removed", removed))
 	}
 	if skipped > 0 {
-		c.log.Info("markdown skip summary", zap.Int("skipped", skipped))
+		c.log.Info("markdown skip summary", slog.Int("skipped", skipped))
 	}
 	return nil
 }
@@ -264,17 +266,17 @@ func (c *Cleaner) CleanSourceComments() error {
 	aiPattern := CompiledCommentAIPattern()
 	modified := 0
 
-	err := filepath.Walk(c.repoDir, func(path string, info os.FileInfo, err error) error {
+	err := filepath.WalkDir(c.repoDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		if info.IsDir() {
-			if dirAlwaysSkipped(info.Name()) {
+		if d.IsDir() {
+			if dirAlwaysSkipped(d.Name()) {
 				return filepath.SkipDir
 			}
 			return nil
 		}
-		ext := strings.ToLower(filepath.Ext(info.Name()))
+		ext := strings.ToLower(filepath.Ext(d.Name()))
 		if !hasExt(ext, sourceExtensions) {
 			return nil
 		}
@@ -287,22 +289,94 @@ func (c *Cleaner) CleanSourceComments() error {
 			return nil
 		}
 		rel, _ := filepath.Rel(c.repoDir, path)
-		c.log.Debug("cleaned comments", zap.String("path", rel))
+		c.log.Debug("cleaned comments", slog.String("path", rel))
 		modified++
 		if c.dryRun {
 			return nil
 		}
-		fi, err := os.Stat(path)
+		info, err := d.Info()
 		if err != nil {
 			return err
 		}
-		return os.WriteFile(path, newContent, fi.Mode())
+		return os.WriteFile(path, newContent, info.Mode())
 	})
 	if err != nil {
 		return err
 	}
 	if modified > 0 {
-		c.log.Info("source comment cleanup summary", zap.Int("files_modified", modified))
+		c.log.Info("source comment cleanup summary", slog.Int("files_modified", modified))
+	}
+	return nil
+}
+
+// proseExtensions are text files treated as prose for typography normalization.
+// Invisible-character stripping is applied to every UTF-8 text file regardless;
+// only the opt-in typography pass is limited to these.
+var proseExtensions = []string{
+	".md", ".markdown", ".mdx", ".txt", ".rst", ".adoc", ".asciidoc",
+}
+
+// CleanWatermarks strips invisible/zero-width watermark and smuggling
+// characters (zero-width spaces, bidi controls, the Unicode Tags block,
+// variation selectors, invisible math operators) from every UTF-8 text file in
+// the tree and normalizes exotic whitespace to plain ASCII spaces. When
+// typography normalization is enabled, prose files additionally have their
+// "smart" punctuation folded back to ASCII.
+//
+// It does not attempt to remove statistical (SynthID-style) watermarks, which
+// live in word choice rather than in the bytes and cannot be scrubbed this way.
+func (c *Cleaner) CleanWatermarks() error {
+	modified := 0
+
+	err := filepath.WalkDir(c.repoDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if dirAlwaysSkipped(d.Name()) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !d.Type().IsRegular() {
+			return nil
+		}
+
+		content, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		if looksBinary(content) {
+			return nil
+		}
+
+		newContent, changed := StripInvisible(content)
+		if c.normalizeTypography && hasExt(strings.ToLower(filepath.Ext(d.Name())), proseExtensions) {
+			var typoChanged bool
+			newContent, typoChanged = NormalizeTypography(newContent)
+			changed = changed || typoChanged
+		}
+		if !changed {
+			return nil
+		}
+
+		rel, _ := filepath.Rel(c.repoDir, path)
+		c.log.Info("stripped watermark characters", slog.String("path", rel))
+		modified++
+		if c.dryRun {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(path, newContent, info.Mode())
+	})
+	if err != nil {
+		return err
+	}
+	if modified > 0 {
+		c.log.Info("watermark cleanup summary", slog.Int("files_modified", modified))
 	}
 	return nil
 }

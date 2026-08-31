@@ -515,7 +515,7 @@ https://claude.ai/code/session_01H
 	runGit(t, tmpDir, "commit", "-m", commitMsg)
 
 	c := newTestCleaner(tmpDir, false)
-	c.SetSkipHistoryPrompt(true)
+	c.skipHistoryPrompt = true
 	if err := c.CleanGitHistory(); err != nil {
 		t.Fatalf("CleanGitHistory() error = %v", err)
 	}

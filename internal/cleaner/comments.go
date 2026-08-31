@@ -84,7 +84,7 @@ func CleanCommentsInSource(src []byte, ext string, aiPattern *regexp.Regexp) ([]
 }
 
 // stripMatchingBlocks removes block-comment spans whose interior text matches
-// aiPattern. Spans are located by literal scanning for open/close — this does
+// aiPattern. Spans are located by literal scanning for open/close - this does
 // not parse strings, so a "/*" inside a quoted literal would be misread, but
 // that's a rare false positive and the same limitation the original code had.
 func stripMatchingBlocks(text, open, close string, aiPattern *regexp.Regexp) (string, bool) {
@@ -103,7 +103,7 @@ func stripMatchingBlocks(text, open, close string, aiPattern *regexp.Regexp) (st
 
 		end := strings.Index(text[start+len(open):], close)
 		if end < 0 {
-			// Unterminated — leave the rest alone.
+			// Unterminated - leave the rest alone.
 			out.WriteString(text[i:])
 			break
 		}
@@ -127,7 +127,7 @@ func stripMatchingBlocks(text, open, close string, aiPattern *regexp.Regexp) (st
 		}
 		leading := text[lineStart:start]
 		if strings.TrimSpace(leading) == "" {
-			// Standalone block — flush up to lineStart and skip past the newline after close.
+			// Standalone block - flush up to lineStart and skip past the newline after close.
 			out.WriteString(text[i:lineStart])
 			j := end
 			if j < len(text) && text[j] == '\n' {
@@ -135,7 +135,7 @@ func stripMatchingBlocks(text, open, close string, aiPattern *regexp.Regexp) (st
 			}
 			i = j
 		} else {
-			// Inline block — keep code before, drop block, keep what follows.
+			// Inline block - keep code before, drop block, keep what follows.
 			out.WriteString(text[i:start])
 			// Strip trailing whitespace just added.
 			trimTrailingHSpace(&out)
@@ -170,10 +170,10 @@ func stripMatchingLineComments(text, token string, aiPattern *regexp.Regexp) (st
 		modified = true
 		before := line[:idx]
 		if strings.TrimSpace(before) == "" {
-			// Standalone — drop the whole line.
+			// Standalone - drop the whole line.
 			continue
 		}
-		// Inline — keep the code, trim trailing whitespace.
+		// Inline - keep the code, trim trailing whitespace.
 		out = append(out, strings.TrimRight(before, " \t"))
 	}
 
@@ -185,7 +185,7 @@ func stripMatchingLineComments(text, token string, aiPattern *regexp.Regexp) (st
 //
 // Handles "..." and '...' literals and (for languages that have them)
 // `...` literals; treats backslash as an escape inside double-quoted strings.
-// This is a heuristic — sufficient for stripping comments cleanly in the
+// This is a heuristic - sufficient for stripping comments cleanly in the
 // common case, without pulling in a full per-language tokenizer.
 func findCommentStart(line, token string) int {
 	tlen := len(token)

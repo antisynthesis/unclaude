@@ -8,7 +8,7 @@ import (
 	"regexp"
 	"strings"
 
-	"go.uber.org/zap"
+	"log/slog"
 )
 
 // CleanGitHistory scans the repository's commit messages for AI traces and,
@@ -67,7 +67,7 @@ func (c *Cleaner) CleanGitHistory() error {
 		if len(commit) > 7 {
 			short = commit[:7]
 		}
-		c.log.Debug("ai trace in commit", zap.String("commit", short))
+		c.log.Debug("ai trace in commit", slog.String("commit", short))
 	}
 
 	if modifiedCount == 0 {
@@ -75,7 +75,7 @@ func (c *Cleaner) CleanGitHistory() error {
 		return nil
 	}
 
-	c.log.Info("ai traces detected in commit history", zap.Int("commits", modifiedCount))
+	c.log.Info("ai traces detected in commit history", slog.Int("commits", modifiedCount))
 
 	if c.dryRun {
 		return nil
@@ -115,7 +115,7 @@ func (c *Cleaner) CleanGitHistory() error {
 		c.log.Info("backup refs preserved under refs/original/ (re-run with --purge-refs to drop them)")
 	}
 
-	c.log.Info("cleaned commit messages", zap.Int("commits", modifiedCount))
+	c.log.Info("cleaned commit messages", slog.Int("commits", modifiedCount))
 	return nil
 }
 
@@ -162,7 +162,10 @@ func escapeForPythonRawBytes(s string) string {
 }
 
 func (c *Cleaner) rewriteWithFilterBranch() error {
-	script := c.createFilterBranchScript()
+	script, err := c.createFilterBranchScript()
+	if err != nil {
+		return err
+	}
 	defer os.Remove(script)
 
 	cmd := exec.Command("git", "-C", c.repoDir, "filter-branch", "-f",
@@ -178,13 +181,14 @@ func (c *Cleaner) rewriteWithFilterBranch() error {
 	return nil
 }
 
-// createFilterBranchScript writes a temporary sed-based message filter.
-// The patterns it emits parallel CommitMessagePatterns but use BRE/ERE syntax
-// portable across the sed implementations shipped with macOS and Linux.
-func (c *Cleaner) createFilterBranchScript() string {
+// createFilterBranchScript writes a temporary sed-based message filter and
+// returns its path. The patterns it emits parallel CommitMessagePatterns but
+// use ERE syntax portable across the sed implementations shipped with macOS and
+// Linux. The caller is responsible for removing the file.
+func (c *Cleaner) createFilterBranchScript() (string, error) {
 	tmp, err := os.CreateTemp("", "unclaude-filter-*.sh")
 	if err != nil {
-		return ""
+		return "", fmt.Errorf("failed to create filter script: %w", err)
 	}
 	defer tmp.Close()
 
@@ -198,14 +202,18 @@ func (c *Cleaner) createFilterBranchScript() string {
 	}
 	b.WriteString("\n")
 
-	tmp.WriteString(b.String())
-	tmp.Chmod(0755)
-	return tmp.Name()
+	if _, err := tmp.WriteString(b.String()); err != nil {
+		return "", fmt.Errorf("failed to write filter script: %w", err)
+	}
+	if err := tmp.Chmod(0o755); err != nil {
+		return "", fmt.Errorf("failed to chmod filter script: %w", err)
+	}
+	return tmp.Name(), nil
 }
 
 // filterBranchSedPatterns is the sed-flavour mirror of CommitMessagePatterns.
 // Kept hand-written because sed's ERE doesn't accept all Go regex constructs
-// (no `(?i)` — handled by the `I` flag on each address instead).
+// (no `(?i)` - handled by the `I` flag on each address instead).
 var filterBranchSedPatterns = []string{
 	`Co-Authored-By:.*@anthropic\.com`,
 	`Co-Authored-By:.*[Cc]laude`,
