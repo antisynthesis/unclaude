@@ -113,6 +113,9 @@ unclaude --apply /path/to/repo
 
 ```
 --apply                  Apply changes (default is preview mode)
+    --only <steps>       Run only these comma-separated steps
+    --skip <steps>       Run every step except these
+    --no-backup          Do not save originals before modifying or deleting
 -i, --interactive        Prompt before deleting each markdown file (requires --apply)
 -v, --verbose            Show debug-level output
     --quiet              Suppress info-level output; only warnings and errors
@@ -160,6 +163,46 @@ unclaude --apply --purge-refs
 
 **Important:** Preview mode is the default. Use `--apply` only when you're ready to make permanent changes.
 
+## Selecting Steps
+
+`unclaude` runs five steps. Pick a subset with `--only` or exclude some with `--skip` (the two are mutually exclusive; canonical order is always preserved):
+
+| Key | What it does |
+| --- | --- |
+| `history` | Rewrite commit messages to drop generation footers |
+| `artifacts` | Remove AI tool directories and instruction files |
+| `markdown` | Remove generic Markdown outside the docs allowlist |
+| `comments` | Strip AI-related comments from source files |
+| `watermarks` | Strip invisible watermark characters from text files |
+
+```bash
+# Strip watermarks only - safe to run in a pre-commit hook
+unclaude --apply --only=watermarks
+
+# Everything except the destructive history rewrite
+unclaude --apply --skip=history
+
+# Comments and watermarks together
+unclaude --apply --only=comments,watermarks
+```
+
+`history` runs first by design: in apply mode it requires a clean working tree, so it has to happen before the file-modifying steps dirty it.
+
+## Undo
+
+In apply mode `unclaude` copies every file it is about to modify or delete into a timestamped directory under `.unclaude-backup/`, alongside a JSON manifest recording each file's original path and permissions. Undo the most recent run with:
+
+```bash
+unclaude restore           # preview what would be restored
+unclaude restore --apply   # actually restore
+```
+
+Restore recreates deleted files and reverts modified ones byte for byte, including their original file mode. Pass `--no-backup` to skip this safety net.
+
+Backups accumulate; each run writes a new timestamped directory and `restore` always uses the newest. Delete `.unclaude-backup/` when you're satisfied with the result — and add it to your `.gitignore`.
+
+**Restore covers file changes only.** To undo a history rewrite, use git's `refs/original/` backup refs or the reflog.
+
 ## Git History Rewriting
 
 `unclaude` prefers [`git-filter-repo`](https://github.com/newren/git-filter-repo) when it is available on `PATH` — this is the rewriting tool the Git project recommends since `filter-branch` was deprecated. If `git-filter-repo` is not installed, `unclaude` falls back to `git filter-branch` and emits a warning.
@@ -168,6 +211,7 @@ After the rewrite, `unclaude` leaves the original refs under `refs/original/` by
 
 **Safety measures:**
 - Preview mode by default — no changes without `--apply`
+- File modifications and deletions are backed up to `.unclaude-backup/` and reversible with `unclaude restore`
 - History rewrite runs first (while the tree is clean), then the file-modifying steps
 - Aborts the run if the working tree has uncommitted changes (in apply mode) — commit or stash first
 - Only prompts for confirmation if AI traces are actually present in history
@@ -198,6 +242,8 @@ cmd/unclaude/             Command interface
 internal/cleaner/         Core operations
     doc.go                Package overview
     cleaner.go            Orchestrator + struct
+    steps.go              Step registry and --only/--skip selection
+    backup.go             File backup + restore (.unclaude-backup/)
     logger.go             slog setup (RFC3339, text/JSON)
     patterns.go           Centralised regex definitions
     comments.go           Source-comment scrubbing (inline + multi-line)
