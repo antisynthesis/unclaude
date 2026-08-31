@@ -44,6 +44,38 @@ Comments are removed correctly whether they're standalone (whole line dropped), 
 - Emoji badges (🤖, 🔧, ✨) with generation markers
 - Trailing signatures (`- Claude`, `- Codex`, …)
 
+**Watermark characters** (in every UTF-8 text file — code *and* prose):
+- Zero-width & joiner characters: zero-width space (U+200B), ZWNJ (U+200C),
+  ZWJ (U+200D), word joiner (U+2060), soft hyphen (U+00AD), BOM mid-file (U+FEFF)
+- Invisible math operators: function application / invisible times / separator /
+  plus (U+2061–U+2064) — a documented data-smuggling channel
+- Directional (bidi) controls: LRM/RLM, embeddings, overrides, isolates
+  (U+200E–U+200F, U+202A–U+202E, U+2066–U+206F)
+- The Unicode Tags block (U+E0000–U+E007F) and variation selectors
+  (U+FE00–U+FE0F, U+E0100–U+E01EF) — the vectors behind "ASCII smuggling"
+- Exotic whitespace normalized to a plain space: narrow no-break space (U+202F),
+  no-break space (U+00A0), en/em/thin/hair spaces, ideographic space, and more
+- Line/paragraph separators (U+2028/U+2029) normalized to a newline
+
+A leading byte-order mark is preserved; binary files are detected and skipped.
+
+**Typography tells** (opt-in, prose files only, via `--normalize-typography`):
+- Em/en dashes and the horizontal bar → `--` / `-`
+- "Smart" single and double quotes → `'` and `"`
+- Ellipsis glyph (…) → `...`, primes (′ ″) → `'` `"`, minus sign (−) → `-`
+
+These are *visible, legitimately authored* characters, so folding them is off by
+default — it is a stylistic normalization, not watermark removal.
+
+### On statistical watermarks
+
+Since August 2026, Anthropic applies a **statistical** watermark to Claude's
+text output — a variant of Google DeepMind's [SynthID-Text](https://www.nature.com/articles/s41586-024-08025-4).
+It is a bias in *which words the model chose*, not a hidden character, so it
+survives copy-paste and **cannot be removed by rewriting bytes**. `unclaude`
+does not attempt to; it removes the invisible-character marks above, which is a
+different and fully removable class of watermark.
+
 ## Installation
 
 ```bash
@@ -80,24 +112,31 @@ unclaude --apply /path/to/repo
 ### Options
 
 ```
---apply             Apply changes (default is preview mode)
--i, --interactive   Prompt before deleting each markdown file (requires --apply)
--v, --verbose       Show debug-level output
-    --quiet         Suppress info-level output; only warnings and errors
-    --json          Emit logs as JSON instead of human-readable console
-    --purge-refs    After history rewrite, delete refs/original/ and run aggressive gc
--h, --help          Display usage information
+--apply                  Apply changes (default is preview mode)
+-i, --interactive        Prompt before deleting each markdown file (requires --apply)
+-v, --verbose            Show debug-level output
+    --quiet              Suppress info-level output; only warnings and errors
+    --json               Emit logs as JSON instead of human-readable console
+    --purge-refs         After history rewrite, delete refs/original/ and run aggressive gc
+    --normalize-typography  Fold smart quotes, em/en dashes, and ellipsis glyphs in prose to plain ASCII
+-h, --help               Display usage information
 ```
 
 ### Output
 
-`unclaude` logs to stdout using [Uber's zap](https://github.com/uber-go/zap) with RFC3339 timestamps. Default is human-readable console output; pass `--json` for structured logs (useful in CI pre-commit hooks).
+`unclaude` logs to stdout using the standard library's [`log/slog`](https://pkg.go.dev/log/slog) with RFC3339 timestamps. The default is human-readable text; pass `--json` for structured logs (useful in CI pre-commit hooks).
 
+Text (default):
 ```
-2025-05-23T14:02:18Z  INFO  preview mode (no changes will be made); use --apply to modify the repository
-2025-05-23T14:02:18Z  INFO  removing ai tool directory  {"path": ".claude"}
-2025-05-23T14:02:18Z  INFO  removing ai tool file       {"path": "CLAUDE.md"}
-2025-05-23T14:02:18Z  INFO  markdown removal summary    {"removed": 2}
+time=2026-08-30T14:02:18.512-06:00 level=INFO msg="preview mode (no changes will be made); use --apply to modify the repository"
+time=2026-08-30T14:02:18.512-06:00 level=INFO msg="removing ai tool directory" path=.claude
+time=2026-08-30T14:02:18.513-06:00 level=INFO msg="removing ai tool file" path=CLAUDE.md
+time=2026-08-30T14:02:18.513-06:00 level=INFO msg="markdown removal summary" removed=2
+```
+
+JSON (`--json`):
+```json
+{"time":"2026-08-30T14:02:18.512-06:00","level":"INFO","msg":"markdown removal summary","removed":2}
 ```
 
 ### Examples
@@ -129,9 +168,9 @@ After the rewrite, `unclaude` leaves the original refs under `refs/original/` by
 
 **Safety measures:**
 - Preview mode by default — no changes without `--apply`
-- Scans commit history first to detect AI traces
-- Only prompts for confirmation if changes are actually needed
-- Aborts if there are unstaged changes (in apply mode)
+- History rewrite runs first (while the tree is clean), then the file-modifying steps
+- Aborts the run if the working tree has uncommitted changes (in apply mode) — commit or stash first
+- Only prompts for confirmation if AI traces are actually present in history
 - Backup refs preserved by default (`refs/original/`)
 - Warns that signed commits will be invalidated by the rewrite
 
@@ -139,29 +178,36 @@ History rewriting is permanent and changes all commit hashes downstream of the r
 
 ## Requirements
 
-- Go 1.21+
+- Go 1.25+ (standard library only — **zero external dependencies**)
 - Git (for history operations)
 - Optional but recommended: `git-filter-repo` (for the non-deprecated rewrite path)
 
 ## Development
 
-Tests:
+Tests and benchmarks:
 ```bash
 go test ./... -race
+go test ./internal/cleaner -bench=. -benchmem
 ```
 
 Structure:
 ```
 cmd/unclaude/             Command interface
+    main.go               Entry point
+    root.go               Flag parsing + step orchestration (stdlib flag)
 internal/cleaner/         Core operations
+    doc.go                Package overview
     cleaner.go            Orchestrator + struct
-    logger.go             Zap setup (RFC3339, console/JSON)
+    logger.go             slog setup (RFC3339, text/JSON)
     patterns.go           Centralised regex definitions
     comments.go           Source-comment scrubbing (inline + multi-line)
+    watermark.go          Invisible-character stripping + typography normalization
     history.go            Git history rewrite (filter-repo / filter-branch)
 ```
 
-CI runs `gofmt`, `go vet`, `go build`, and `go test -race` on every push and PR via `.github/workflows/ci.yml`.
+The CLI uses the standard library's `flag` package and `log/slog`; there are no
+third-party dependencies. CI runs `gofmt`, `go vet`, `go build`, and
+`go test -race` on every push and PR via `.github/workflows/ci.yml`.
 
 ## License
 
