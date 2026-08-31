@@ -220,6 +220,37 @@ After the rewrite, `unclaude` leaves the original refs under `refs/original/` by
 
 History rewriting is permanent and changes all commit hashes downstream of the rewritten commits. Coordinate with your team before running on a shared branch.
 
+## Using the watermark package in your own code
+
+The invisible-character logic is a standalone, importable package — no CLI, no git, no filesystem, and (like the rest of this module) **no dependencies beyond the standard library**:
+
+```bash
+go get github.com/antisynthesis/unclaude/pkg/watermark
+```
+
+Detect without modifying, which suits linters, CI checks, and diagnostics:
+
+```go
+for _, f := range watermark.Find(data) {
+    fmt.Printf("%s:%d:%d: %s U+%04X\n", path, f.Line, f.Column, f.Category, f.Rune)
+}
+// main.go:2:14: bidi-control U+202E
+```
+
+Or clean the bytes:
+
+```go
+cleaned, changed := watermark.Strip(data)
+cleaned, changed = watermark.Strip(data, watermark.WithTypography())   // also fold smart punctuation
+cleaned, changed = watermark.Strip(data, watermark.PreserveZWJ())      // keep emoji ZWJ sequences intact
+```
+
+`Contains` answers the same question as `Find` when you only need a yes or no, and stops at the first hit. All three share one classifier, so what `Find` reports is exactly what `Strip` changes.
+
+**Beyond provenance marks, three of the covered ranges are live attack vectors:** bidi controls are the mechanism behind [Trojan Source](https://trojansource.codes/) (CVE-2021-42574); the Unicode Tags block is an invisible ASCII alphabet used to smuggle instructions past reviewers and into language models; and variation selectors number exactly 256 — enough to encode any byte. Scanning untrusted input before it reaches a reviewer, a compiler, or a model prompt is a first-class use of this package.
+
+Full API documentation: [pkg.go.dev](https://pkg.go.dev/github.com/antisynthesis/unclaude/pkg/watermark).
+
 ## Requirements
 
 - Go 1.25+ (standard library only — **zero external dependencies**)
@@ -239,7 +270,11 @@ Structure:
 cmd/unclaude/             Command interface
     main.go               Entry point
     root.go               Flag parsing + step orchestration (stdlib flag)
-internal/cleaner/         Core operations
+pkg/watermark/            Public library: invisible-character find/strip
+    doc.go                Package overview
+    watermark.go          Find, Contains, Strip, IsBinary, options
+    tables.go             Codepoint tables by category
+internal/cleaner/         Application logic (not importable)
     doc.go                Package overview
     cleaner.go            Orchestrator + struct
     steps.go              Step registry and --only/--skip selection
@@ -247,9 +282,10 @@ internal/cleaner/         Core operations
     logger.go             slog setup (RFC3339, text/JSON)
     patterns.go           Centralised regex definitions
     comments.go           Source-comment scrubbing (inline + multi-line)
-    watermark.go          Invisible-character stripping + typography normalization
     history.go            Git history rewrite (filter-repo / filter-branch)
 ```
+
+`pkg/watermark` is the only public surface. Everything under `internal/` is application logic — it is coupled to the CLI (including interactive prompts) and deliberately not importable.
 
 The CLI uses the standard library's `flag` package and `log/slog`; there are no
 third-party dependencies. CI runs `gofmt`, `go vet`, `go build`, and
