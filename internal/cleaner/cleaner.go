@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/antisynthesis/unclaude/pkg/watermark"
 )
 
 // Cleaner is the orchestrator for repository scrubbing. One instance handles
@@ -354,12 +356,11 @@ var proseExtensions = []string{
 	".md", ".markdown", ".mdx", ".txt", ".rst", ".adoc", ".asciidoc",
 }
 
-// CleanWatermarks strips invisible/zero-width watermark and smuggling
-// characters (zero-width spaces, bidi controls, the Unicode Tags block,
-// variation selectors, invisible math operators) from every UTF-8 text file in
-// the tree and normalizes exotic whitespace to plain ASCII spaces. When
-// typography normalization is enabled, prose files additionally have their
-// "smart" punctuation folded back to ASCII.
+// CleanWatermarks strips invisible watermark and smuggling characters from
+// every UTF-8 text file in the tree and normalizes exotic whitespace to plain
+// ASCII spaces, using package watermark. When typography normalization is
+// enabled, prose files additionally have their "smart" punctuation folded back
+// to ASCII.
 //
 // It does not attempt to remove statistical (SynthID-style) watermarks, which
 // live in word choice rather than in the bytes and cannot be scrubbed this way.
@@ -384,16 +385,17 @@ func (c *Cleaner) CleanWatermarks() error {
 		if err != nil {
 			return err
 		}
-		if looksBinary(content) {
+		if watermark.IsBinary(content) {
 			return nil
 		}
 
-		newContent, changed := StripInvisible(content)
+		// Typography folding is scoped to prose: an em dash inside source code
+		// is far more likely to be intentional than a stylistic artifact.
+		var opts []watermark.Option
 		if c.normalizeTypography && hasExt(strings.ToLower(filepath.Ext(d.Name())), proseExtensions) {
-			var typoChanged bool
-			newContent, typoChanged = NormalizeTypography(newContent)
-			changed = changed || typoChanged
+			opts = append(opts, watermark.WithTypography())
 		}
+		newContent, changed := watermark.Strip(content, opts...)
 		if !changed {
 			return nil
 		}

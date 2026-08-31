@@ -6,7 +6,8 @@
 //   - CleanMarkdownFiles removes generic Markdown outside a documentation allowlist.
 //   - CleanSourceComments strips AI-related comments from source files.
 //   - CleanWatermarks removes invisible watermark/smuggling characters (and,
-//     optionally, normalizes visible "smart" typography in prose).
+//     optionally, normalizes visible "smart" typography in prose) using
+//     package watermark.
 //   - CleanGitHistory rewrites commit messages to drop generation footers.
 //
 // Steps returns these operations as a keyed, ordered list so callers can run a

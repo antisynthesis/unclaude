@@ -5,50 +5,7 @@ import (
 	"testing"
 )
 
-// benchProse builds a multi-kilobyte prose blob. When seeded is true, every
-// tenth line carries a zero-width space and a narrow no-break space so the
-// modifying path (not just the scan) is exercised.
-func benchProse(seeded bool) []byte {
-	var b strings.Builder
-	const line = "The quick brown fox jumps over the lazy dog while refactoring code.\n"
-	for i := 0; i < 200; i++ {
-		b.WriteString(line)
-		if seeded && i%10 == 0 {
-			b.WriteString("hidden" + string(rune(0x200B)) + "mark" + string(rune(0x202F)) + "here\n")
-		}
-	}
-	return []byte(b.String())
-}
-
-func BenchmarkStripInvisibleSeeded(b *testing.B) {
-	in := benchProse(true)
-	b.SetBytes(int64(len(in)))
-	b.ReportAllocs()
-	for b.Loop() {
-		StripInvisible(in)
-	}
-}
-
-func BenchmarkStripInvisibleClean(b *testing.B) {
-	in := benchProse(false)
-	b.SetBytes(int64(len(in)))
-	b.ReportAllocs()
-	for b.Loop() {
-		StripInvisible(in)
-	}
-}
-
-func BenchmarkNormalizeTypography(b *testing.B) {
-	unit := "A line with " + string(rune(0x2014)) + " dashes, " +
-		string(rune(0x201C)) + "quotes" + string(rune(0x201D)) + ", and " +
-		string(rune(0x2026)) + " ellipsis.\n"
-	in := []byte(strings.Repeat(unit, 200))
-	b.SetBytes(int64(len(in)))
-	b.ReportAllocs()
-	for b.Loop() {
-		NormalizeTypography(in)
-	}
-}
+// Watermark-scrubbing benchmarks live in pkg/watermark, alongside the code.
 
 func BenchmarkCleanCommentsInSource(b *testing.B) {
 	pattern := CompiledCommentAIPattern()
