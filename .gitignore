@@ -36,3 +36,6 @@ go.work.sum
 
 # Built binary
 /unclaude
+
+# Backups written by `unclaude --apply`
+.unclaude-backup/

@@ -19,6 +19,7 @@ type Cleaner struct {
 	skipHistoryPrompt   bool
 	purgeRefs           bool
 	normalizeTypography bool
+	backup              *backup
 	log                 *slog.Logger
 }
 
@@ -31,7 +32,10 @@ type Options struct {
 	// (curly quotes, em/en dashes, ellipsis glyphs) in prose files back to
 	// plain ASCII. Off by default because it alters authored, visible content.
 	NormalizeTypography bool
-	Logger              *slog.Logger
+	// Backup preserves a copy of every file the cleaner modifies or deletes so
+	// the run can be undone with Restore. It has no effect in DryRun mode.
+	Backup bool
+	Logger *slog.Logger
 }
 
 // New creates a Cleaner. If Options.Logger is nil, a no-op logger is used.
@@ -40,7 +44,7 @@ func New(repoDir string, opts Options) *Cleaner {
 	if log == nil {
 		log = newNopLogger()
 	}
-	return &Cleaner{
+	c := &Cleaner{
 		repoDir:             repoDir,
 		dryRun:              opts.DryRun,
 		interactive:         opts.Interactive,
@@ -48,6 +52,28 @@ func New(repoDir string, opts Options) *Cleaner {
 		normalizeTypography: opts.NormalizeTypography,
 		log:                 log,
 	}
+	if opts.Backup && !opts.DryRun {
+		c.backup = newBackup(repoDir)
+	}
+	return c
+}
+
+// preserve backs up path (a file or directory) before a destructive change,
+// when backups are enabled. It is a no-op in dry-run mode or with --no-backup.
+func (c *Cleaner) preserve(path string) error {
+	if c.backup == nil {
+		return nil
+	}
+	return c.backup.save(path)
+}
+
+// FinalizeBackup writes the backup manifest and returns the backup directory,
+// or "" when nothing was backed up. Call it once after all steps complete.
+func (c *Cleaner) FinalizeBackup() (string, error) {
+	if c.backup == nil {
+		return "", nil
+	}
+	return c.backup.finalize()
 }
 
 // IsGitRepo reports whether dir contains a .git directory.
@@ -84,7 +110,7 @@ func (c *Cleaner) promptForDeletion(relPath string) bool {
 // that subsequent walks don't visit their interior.
 func dirAlwaysSkipped(name string) bool {
 	switch name {
-	case ".git", "node_modules", "vendor",
+	case ".git", "node_modules", "vendor", backupDirName,
 		".claude", ".codex", ".cursor", ".continue", ".aider":
 		return true
 	}
@@ -111,6 +137,9 @@ func (c *Cleaner) CleanAIArtifacts() error {
 		}
 		c.log.Info("removing ai tool directory", slog.String("path", d))
 		if !c.dryRun {
+			if err := c.preserve(path); err != nil {
+				return fmt.Errorf("failed to back up %s: %w", d, err)
+			}
 			if err := os.RemoveAll(path); err != nil {
 				return fmt.Errorf("failed to remove %s: %w", d, err)
 			}
@@ -166,6 +195,9 @@ func (c *Cleaner) CleanAIArtifacts() error {
 		rel, _ := filepath.Rel(c.repoDir, m)
 		c.log.Info("removing ai tool file", slog.String("path", rel))
 		if !c.dryRun {
+			if err := c.preserve(m); err != nil {
+				return fmt.Errorf("failed to back up %s: %w", rel, err)
+			}
 			if err := os.Remove(m); err != nil {
 				return fmt.Errorf("failed to remove %s: %w", rel, err)
 			}
@@ -237,6 +269,9 @@ func (c *Cleaner) CleanMarkdownFiles() error {
 		}
 		c.log.Info("removing markdown file", slog.String("path", rel))
 		if !c.dryRun {
+			if err := c.preserve(file); err != nil {
+				return fmt.Errorf("failed to back up %s: %w", rel, err)
+			}
 			if err := os.Remove(file); err != nil {
 				return fmt.Errorf("failed to remove %s: %w", rel, err)
 			}
@@ -293,6 +328,9 @@ func (c *Cleaner) CleanSourceComments() error {
 		modified++
 		if c.dryRun {
 			return nil
+		}
+		if err := c.preserve(path); err != nil {
+			return fmt.Errorf("failed to back up %s: %w", rel, err)
 		}
 		info, err := d.Info()
 		if err != nil {
@@ -365,6 +403,9 @@ func (c *Cleaner) CleanWatermarks() error {
 		modified++
 		if c.dryRun {
 			return nil
+		}
+		if err := c.preserve(path); err != nil {
+			return fmt.Errorf("failed to back up %s: %w", rel, err)
 		}
 		info, err := d.Info()
 		if err != nil {

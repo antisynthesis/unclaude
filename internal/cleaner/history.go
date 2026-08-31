@@ -20,7 +20,7 @@ func (c *Cleaner) CleanGitHistory() error {
 	if err != nil {
 		return fmt.Errorf("failed to check git status: %w", err)
 	}
-	if len(statusOutput) > 0 && !c.dryRun {
+	if !c.dryRun && hasWorkingTreeChanges(string(statusOutput)) {
 		return fmt.Errorf("repository has unstaged changes - commit or stash them before rewriting history")
 	}
 
@@ -257,6 +257,28 @@ func (c *Cleaner) purgeBackupRefs() {
 	}
 	exec.Command("git", "-C", c.repoDir, "reflog", "expire", "--expire=now", "--all").Run()
 	exec.Command("git", "-C", c.repoDir, "gc", "--prune=now", "--aggressive").Run()
+}
+
+// hasWorkingTreeChanges reports whether `git status --porcelain` output shows
+// changes that should block a history rewrite. unclaude's own backup directory
+// is ignored: it is a product of a previous run, not user work at risk.
+func hasWorkingTreeChanges(status string) bool {
+	for _, line := range strings.Split(status, "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		// Porcelain v1 format: two status characters, a space, then the path.
+		if len(line) < 4 {
+			return true
+		}
+		path := strings.TrimSpace(line[3:])
+		path = strings.Trim(path, `"`)
+		if path == backupDirName || strings.HasPrefix(path, backupDirName+"/") {
+			continue
+		}
+		return true
+	}
+	return false
 }
 
 // cleanCommitMessage strips lines matching any of patterns and removes
